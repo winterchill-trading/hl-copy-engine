@@ -1,6 +1,6 @@
 (* Builder fees against hl-sim in process, with -strict-signatures: the follower's orders
-   go out without the builder field until the account approves the fee, then carry it,
-   and the builder account is credited. *)
+   go out without the builder field until the account approves the fee, then carry it, and
+   the builder account is credited. *)
 
 open! Core
 open! Async
@@ -15,12 +15,12 @@ let agent_key = Sim.key 0x22
 let leader_key = Sim.key 0x33
 let user = Signing.Private_key.address user_key
 let leader = Signing.Private_key.address leader_key
+
 (* 0x44 is the simulator's maker. *)
 let builder = Signing.Private_key.address (Sim.key 0x55)
 
 (* 1 bp of notional. *)
 let fee = { Builder_fee.builder; fee_tenths_bp = 10 }
-
 let owner sim = Hl_client.Client.trading ~key:user_key (Sim.config sim ())
 
 let approve_agent sim =
@@ -51,8 +51,8 @@ let equity sim address =
   state.margin_summary.account_value
 ;;
 
-(* Within one lot: the follower's equity drifts from the leader's with fees, so a 1:1
-   copy can land a lot short. *)
+(* Within one lot: the follower's equity drifts from the leader's with fees, so a 1:1 copy
+   can land a lot short. *)
 let follow_until sim follower ~size =
   Sim.wait_until ~what:"follower reaches the leader" (fun () ->
     let%bind () = Follower.idle follower in
@@ -80,8 +80,7 @@ let print_builder follower =
         ~rejects:(Metrics.total_rejects m : int)
         ~builder_fee_orders:(m.builder_fee_orders : int)
         ~builder_fee_skipped:(m.builder_fee_skipped : int)];
-  print_endline
-    (Yojson.Safe.to_string (Yojson.Safe.Util.member "builder" status))
+  print_endline (Yojson.Safe.to_string (Yojson.Safe.Util.member "builder" status))
 ;;
 
 let%expect_test "builder fee only once approved, and the builder is paid" =

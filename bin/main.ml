@@ -126,7 +126,9 @@ let run_command =
          | Some address, Some fee_tenths_bp when fee_tenths_bp > 0 && fee_tenths_bp <= 100
            ->
            (* [Address.of_string] accepts any string; check the 0x + 40 hex shape here. *)
-           let is_hex c = Char.is_digit c || Char.between (Char.lowercase c) ~low:'a' ~high:'f' in
+           let is_hex c =
+             Char.is_digit c || Char.between (Char.lowercase c) ~low:'a' ~high:'f'
+           in
            if String.length address = 42
               && String.is_prefix address ~prefix:"0x"
               && String.for_all (String.drop_prefix address 2) ~f:is_hex
@@ -136,7 +138,9 @@ let run_command =
                ; fee_tenths_bp
                }
            else (
-             Core.eprintf "-builder: %S is not a 0x-prefixed 40-digit hex address\n" address;
+             Core.eprintf
+               "-builder: %S is not a 0x-prefixed 40-digit hex address\n"
+               address;
              Stdlib.exit 2)
          | _ ->
            (* Perps cap builder fees at 0.1%, 100 tenths of a basis point. *)

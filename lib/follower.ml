@@ -170,10 +170,10 @@ let update_pnl_metrics t =
         t.metrics.unrealized_pnl <- Usd.to_float s.unrealized))
 ;;
 
-(* [maxBuilderFee] weighs 20 against 6 for the rest of a resync, so an approved account
-   is checked again only every 5 minutes; a revoked approval shows up sooner as a
-   rejected order ([Rejected]), and an account that has not approved is checked on every
-   resync so its approval takes effect at once. *)
+(* [maxBuilderFee] weighs 20 against 6 for the rest of a resync, so an approved account is
+   checked again only every 5 minutes; a revoked approval shows up sooner as a rejected
+   order ([Rejected]), and an account that has not approved is checked on every resync so
+   its approval takes effect at once. *)
 let builder_recheck_interval = Time_ns.Span.of_int_sec 300
 
 (* Reads the follower's approved cap for the configured builder. A failed check keeps the

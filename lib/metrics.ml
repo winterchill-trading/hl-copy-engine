@@ -148,10 +148,8 @@ let prometheus follows =
     t.unrealized_pnl);
   gauge "hl_copy_equity_change_usd" "Follower equity minus its equity at start." (fun t ->
     t.equity_change);
-  counter
-    "hl_copy_builder_fee_orders_total"
-    "Orders sent with the builder fee."
-    (fun t -> t.builder_fee_orders);
+  counter "hl_copy_builder_fee_orders_total" "Orders sent with the builder fee." (fun t ->
+    t.builder_fee_orders);
   counter
     "hl_copy_builder_fee_skipped_total"
     "Orders sent without the builder fee because the follower has not approved it."

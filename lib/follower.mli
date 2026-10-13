@@ -97,8 +97,8 @@ val last_error : t -> string option
 (** For [/status]: [follower], [leader], [state] (running, paused, stopped), [pnl]
     (attributed realized plus unrealized, USD), [positions] (a list of [coin], [size],
     [entry_px], [unrealized_pnl], [leverage], all numbers), [last_error], and details
-    (equities, both positions maps, margin cap, last resync, metrics). [builder] is
-    [null] without a builder, else [address], [fee_tenths_bp], [approved],
+    (equities, both positions maps, margin cap, last resync, metrics). [builder] is [null]
+    without a builder, else [address], [fee_tenths_bp], [approved],
     [max_approved_tenths_bp] (from the last [maxBuilderFee] check) and [note], which says
     why orders go out without the builder field ([null] when approved). *)
 val status_json : t -> Yojson.Safe.t
