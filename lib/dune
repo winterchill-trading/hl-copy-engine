@@ -1,0 +1,6 @@
+(library
+ (name hl_copy_engine)
+ (public_name hl-copy-engine)
+ (libraries core async hl-protocol hl-client hl-copy-core market-data uri)
+ (preprocess
+  (pps ppx_jane)))
