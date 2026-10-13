@@ -126,6 +126,7 @@ type t =
   ; mutable drop_leader_updates : bool
   ; mutable last_error : string option
   ; mutable builder_state : Builder_state.t
+  ; mutable builder_checked_at : Time_ns.t option
   ; stopped : unit Ivar.t
   }
 
@@ -169,10 +170,23 @@ let update_pnl_metrics t =
         t.metrics.unrealized_pnl <- Usd.to_float s.unrealized))
 ;;
 
+(* [maxBuilderFee] weighs 20 against 6 for the rest of a resync, so an approved account
+   is checked again only every 5 minutes; a revoked approval shows up sooner as a
+   rejected order ([Rejected]), and an account that has not approved is checked on every
+   resync so its approval takes effect at once. *)
+let builder_recheck_interval = Time_ns.Span.of_int_sec 300
+
 (* Reads the follower's approved cap for the configured builder. A failed check keeps the
    last answer, so a flaky info request does not drop the fee from approved accounts. *)
 let check_builder t =
+  let due () =
+    match t.builder_state, t.builder_checked_at with
+    | Approved _, Some at ->
+      Time_ns.Span.( >= ) (Time_ns.diff (now t) at) builder_recheck_interval
+    | _ -> true
+  in
   match t.config.builder with
+  | Some _ when not (due ()) -> return ()
   | None -> return ()
   | Some (builder : Builder_fee.t) ->
     let%bind () =
@@ -185,6 +199,7 @@ let check_builder t =
     let%map result =
       Hl_client.Info.max_builder_fee t.api ~user:follower ~builder:builder.builder
     in
+    t.builder_checked_at <- Some (now t);
     let before = t.builder_state in
     t.builder_state
     <- (match result, before with
@@ -552,6 +567,7 @@ let start
     ; drop_leader_updates = false
     ; last_error = None
     ; builder_state = Unchecked
+    ; builder_checked_at = None
     ; stopped = Ivar.create ()
     }
   in

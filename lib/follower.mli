@@ -37,7 +37,9 @@ module Config : sig
     ; resync_interval : Time_ns.Span.t
     ; journal_root : string option (** no journal when [None] *)
     ; builder : Hl_protocol.Builder_fee.t option
-    (** sent on every order while the follower has approved at least this fee *)
+    (** sent on every order while the follower has approved at least this fee
+        ([maxBuilderFee], checked at start and on resyncs: every resync until approved,
+        then every 5 minutes or after an order is refused over the builder fee) *)
     }
 
   (** 30 s resyncs, no journal, no builder. *)
