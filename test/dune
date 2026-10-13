@@ -5,6 +5,7 @@
    (:standard -source-tree-root .)))
  (libraries
   async
+  cohttp-async
   core
   core_unix
   core_unix.filename_unix
