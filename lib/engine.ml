@@ -13,6 +13,7 @@ module Config = struct
     ; leader_poll_interval : Time_ns.Span.t
     ; signer_for : Follower_config.t -> Follower.Signer.t Or_error.t Deferred.t
     ; agent_of : (Follower_config.t -> Address.t option Or_error.t) option
+    ; builder : Hl_protocol.Builder_fee.t option
     }
 
   let create
@@ -22,6 +23,7 @@ module Config = struct
     ?(max_ws_users = Hl_client.User_feed.default_max_users)
     ?(leader_poll_interval = Time_ns.Span.of_int_sec 5)
     ?agent_of
+    ?builder
     ~api
     ~configs_dir
     ~signer_for
@@ -36,6 +38,7 @@ module Config = struct
     ; leader_poll_interval
     ; signer_for
     ; agent_of
+    ; builder
     }
   ;;
 end
@@ -104,6 +107,7 @@ let start_follower t follow =
     (Follower.Config.create
        ?journal_root:t.config.journal_root
        ~resync_interval:t.config.resync_interval
+       ?builder:t.config.builder
        ~signer
        follow)
 ;;

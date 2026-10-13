@@ -30,10 +30,12 @@ module Config : sig
     (** the account's current agent, checked on every scan: [None] (revoked) pauses the
         follower, a different address restarts it with the new key, and a follow that
         could not start is retried as soon as it changes *)
+    ; builder : Hl_protocol.Builder_fee.t option
+    (** passed to every follower ({!Follower.Config.builder}) *)
     }
 
   (** Scan every second, resync every 30 s, 10 websocket leaders, poll others every 5 s,
-      no journal. *)
+      no journal, no builder. *)
   val create
     :  ?journal_root:string
     -> ?scan_interval:Time_ns.Span.t
@@ -41,6 +43,7 @@ module Config : sig
     -> ?max_ws_users:int
     -> ?leader_poll_interval:Time_ns.Span.t
     -> ?agent_of:(Follower_config.t -> Address.t option Or_error.t)
+    -> ?builder:Hl_protocol.Builder_fee.t
     -> api:Hl_client.Config.t
     -> configs_dir:string
     -> signer_for:(Follower_config.t -> Follower.Signer.t Or_error.t Deferred.t)
