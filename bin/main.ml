@@ -42,7 +42,11 @@ let log_level_param =
       ~doc:"LEVEL debug, info or error (default info)"
   in
   Log.Global.set_output [ Log.Output.stderr () ];
-  Log.Global.set_level (Log.Level.of_string level)
+  Log.Global.set_level
+    (match String.lowercase level with
+     | "debug" -> `Debug
+     | "error" -> `Error
+     | _ -> `Info)
 ;;
 
 let run_command =
@@ -173,9 +177,16 @@ let replay_command =
     (let%map_open.Command dir =
        anon ("DIR" %: string)
        (* <journal-dir>/<follower>-<leader> *)
-     and show_state = flag "-state" no_arg ~doc:" print the final state" in
+     and show_state = flag "-state" no_arg ~doc:" print the final state"
+     and print_entries =
+       flag "-print" no_arg ~doc:" print every entry, one sexp per line"
+     in
      fun () ->
        let%bind entries = Journal.load dir in
+       if print_entries
+       then
+         List.iter entries ~f:(fun entry ->
+           print_endline (Sexp.to_string [%sexp (entry : Journal.Entry.t)]));
        Deferred.return
          (let%bind.Or_error verified = Journal.verify entries in
           print_s
