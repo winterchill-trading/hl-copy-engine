@@ -69,8 +69,11 @@ prints the final state); it exits non-zero on the first difference.
 Agent keys: in production the engine shares the API's state directory (`-state-dir`,
 mounted read-only) and opens each follower's agent from `Hl_copy_core.Key_store`
 (`<state-dir>/agents/<account>.key`, sealed under `HL_COPY_MASTER_KEY`) in memory when the
-follower starts (`Key_source.keystore_signer`); a missing, revoked or expired agent keeps
-the follow from starting, and the error shows in `/status`. The signer is a hook
+follower starts (`Key_source.keystore_signer`); a missing or expired agent keeps the
+follow from starting (state `error` in `/status`, retried as soon as the key file changes).
+Every scan also reads each running follower's key file without decrypting it: a revoked
+agent (file deleted) pauses the follow and cancels its orders, a rotated one restarts the
+follower with the new key. The signer is a hook
 (`Engine.Config.signer_for`, returning `Follower.Signer.Agent key`, `Hook sign` or
 `Unsigned`), so tests and local runs can pass one key from the environment
 (`-agent-key-env`) instead. Keys are never logged or printed.
@@ -140,7 +143,11 @@ no_liquidity, agent, rate_limited, other), `hl_copy_resyncs_total`,
 `hl_copy_equity_change_usd`, `hl_copy_paused`; and per engine `hl_copy_followers`,
 `hl_copy_config_errors`, `hl_copy_rest_weight_total`.
 
-`/status` (JSON): per follower its status and pause reason, the leader's source
+`/status` (JSON): `{"followers": [...], "leaders": [...], "errors": [...]}`. Each
+follower entry carries what hl-copy-api's `/me` reads, `follower`, `leader`, `state`
+(`running`, `paused`, `stopped`, or `error` for a follow that could not start), `pnl`
+(attributed, USD), `positions` (`coin`, `size`, `entry_px`, `unrealized_pnl`, `leverage`,
+all numbers) and `last_error`, then details: its agent address, pause reason, the leader's source
 (websocket or polling), both equities and positions, pending orders, margin cap,
 shortfall, last resync and the metrics; the followed leaders with their follower counts;
 follow files that failed to apply.
@@ -225,9 +232,8 @@ the agent keys through `Engine.Config.signer_for`.
   field.
 - Fees per fill: taken from resync equity, not from `userFills`; PnL attribution is
   before fees.
-- Agent rotation: a follower keeps the agent it started with; after the user approves a
-  new agent the old one is rejected, the follow pauses, and it picks up the new key when
-  restarted (its follow file removed and written again, or an engine restart).
+- Address-based request limits, liquidation flags and a back-off of the resync interval
+  under rate limiting (see the design's failure table).
 
 ## Build
 
