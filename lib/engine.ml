@@ -12,6 +12,7 @@ module Config = struct
     ; max_ws_users : int
     ; leader_poll_interval : Time_ns.Span.t
     ; signer_for : Follower_config.t -> Follower.Signer.t Or_error.t Deferred.t
+    ; agent_of : (Follower_config.t -> Address.t option Or_error.t) option
     }
 
   let create
@@ -20,6 +21,7 @@ module Config = struct
     ?(resync_interval = Time_ns.Span.of_int_sec 30)
     ?(max_ws_users = Hl_client.User_feed.default_max_users)
     ?(leader_poll_interval = Time_ns.Span.of_int_sec 5)
+    ?agent_of
     ~api
     ~configs_dir
     ~signer_for
@@ -33,9 +35,21 @@ module Config = struct
     ; max_ws_users
     ; leader_poll_interval
     ; signer_for
+    ; agent_of
     }
   ;;
 end
+
+(* Why a file is not running: kept across scans so a failed start is retried only when the
+   file or the account's agent changes, or after [retry_after] (each start reads [meta],
+   weight 20). *)
+type failure =
+  { contents : string
+  ; follow : Follower_config.t option
+  ; error : Error.t
+  ; agent : Address.t option Or_error.t option
+  ; at : Time_ns.t
+  }
 
 type running =
   { contents : string
@@ -47,7 +61,8 @@ type t =
   ; hub : Leader_hub.t
   ; rate_limit : Rate_limit.t
   ; running : running String.Table.t (** by file name *)
-  ; mutable errors : (string * Error.t) list
+  ; failures : failure String.Table.t
+  ; mutable dir_error : Error.t option
   ; mutable http : (Socket.Address.Inet.t, int) Cohttp_async.Server.t option
   ; scanning : unit Sequencer.t
   ; stopped : unit Ivar.t
@@ -68,7 +83,12 @@ let find t ~follower ~leader =
     Address.equal follow.follower follower && Address.equal follow.leader leader)
 ;;
 
-let errors t = t.errors
+let errors t =
+  Option.to_list (Option.map t.dir_error ~f:(fun e -> t.config.configs_dir, e))
+  @ (Hashtbl.to_alist t.failures
+     |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+     |> List.map ~f:(fun (name, (f : failure)) -> name, f.error))
+;;
 
 let same_pair (a : Follower_config.t) (b : Follower_config.t) =
   Address.equal a.follower b.follower && Address.equal a.leader b.leader
@@ -109,13 +129,115 @@ let read_dir dir =
     Ok files
 ;;
 
+let retry_after = Time_ns.Span.of_int_sec 30
+
+let current_agent t follow =
+  Option.map t.config.agent_of ~f:(fun agent_of -> agent_of follow)
+;;
+
+let same_agent a b =
+  match a, b with
+  | None, None -> true
+  | Some (Ok a), Some (Ok b) -> Option.equal Address.equal a b
+  | Some (Error _), Some (Error _) -> true
+  | _ -> false
+;;
+
+let fail t name ~contents ?follow error =
+  let agent = Option.bind follow ~f:(current_agent t) in
+  Hashtbl.set
+    t.failures
+    ~key:name
+    ~data:{ contents; follow; error; agent; at = Time_ns.now () }
+;;
+
+(* Restart a follower whose account's agent was rotated; pause one whose agent was revoked
+   (the key file is gone). *)
+let check_agent t name (r : running) =
+  match current_agent t (Follower.follow r.follower) with
+  | None | Some (Error _) -> return ()
+  | Some (Ok None) ->
+    (match (Follower.state r.follower).status with
+     | Running -> Follower.pause r.follower ~reason:"agent revoked"
+     | Paused _ | Stopped -> return ())
+  | Some (Ok (Some agent)) ->
+    if Option.equal Address.equal (Follower.agent_address r.follower) (Some agent)
+    then return ()
+    else (
+      Log.Global.info_s
+        [%message
+          "agent changed, restarting the follower"
+            ~follower:((Follower.follow r.follower).follower : Address.t)];
+      let follow = Follower.follow r.follower in
+      Hashtbl.remove t.running name;
+      let%bind () = Follower.stop r.follower in
+      match%map start_follower t follow with
+      | Ok follower -> Hashtbl.set t.running ~key:name ~data:{ r with follower }
+      | Error err -> fail t name ~contents:r.contents ~follow err)
+;;
+
+let apply_file t (name, contents) =
+  match Hashtbl.find t.running name with
+  | Some r when String.equal r.contents contents -> check_agent t name r
+  | existing ->
+    (match Follower_config.of_file_contents contents with
+     | Error err ->
+       fail t name ~contents err;
+       return ()
+     | Ok follow ->
+       let retry =
+         match Hashtbl.find t.failures name with
+         | Some f when Option.is_none existing && String.equal f.contents contents ->
+           Time_ns.Span.( >= ) (Time_ns.diff (Time_ns.now ()) f.at) retry_after
+           || not (same_agent f.agent (current_agent t follow))
+         | _ -> true
+       in
+       let duplicate =
+         Hashtbl.existsi t.running ~f:(fun ~key ~data ->
+           (not (String.equal key name))
+           && same_pair (Follower.follow data.follower) follow)
+       in
+       if not retry
+       then return ()
+       else if duplicate
+       then (
+         fail
+           t
+           name
+           ~contents
+           ~follow
+           (Error.of_string "another file already follows this pair");
+         return ())
+       else (
+         match existing with
+         | Some r when same_pair (Follower.follow r.follower) follow ->
+           (match%map Follower.reconfigure r.follower follow with
+            | Ok () -> Hashtbl.set t.running ~key:name ~data:{ r with contents }
+            | Error err -> fail t name ~contents ~follow err)
+         | _ ->
+           let%bind () =
+             match existing with
+             | None -> return ()
+             | Some r ->
+               Hashtbl.remove t.running name;
+               Follower.stop r.follower
+           in
+           (match%map start_follower t follow with
+            | Ok follower ->
+              Hashtbl.remove t.failures name;
+              Hashtbl.set t.running ~key:name ~data:{ contents; follower }
+            | Error err ->
+              Log.Global.info_s [%message "follow not started" name (err : Error.t)];
+              fail t name ~contents ~follow err)))
+;;
+
 let scan_once t =
   match%bind read_dir t.config.configs_dir with
   | Error err ->
-    t.errors <- [ t.config.configs_dir, err ];
+    t.dir_error <- Some err;
     return ()
   | Ok files ->
-    let errors = ref [] in
+    t.dir_error <- None;
     let present = String.Set.of_list (List.map files ~f:fst) in
     (* Removed files first, so a follow renamed to another file restarts cleanly. *)
     let%bind () =
@@ -127,49 +249,8 @@ let scan_once t =
           | None -> return ()
           | Some r -> Follower.stop r.follower))
     in
-    let%map () =
-      Deferred.List.iter ~how:`Sequential files ~f:(fun (name, contents) ->
-        match Hashtbl.find t.running name with
-        | Some r when String.equal r.contents contents -> return ()
-        | existing ->
-          (match Follower_config.of_file_contents contents with
-           | Error err ->
-             errors := (name, err) :: !errors;
-             return ()
-           | Ok follow ->
-             let duplicate =
-               Hashtbl.existsi t.running ~f:(fun ~key ~data ->
-                 (not (String.equal key name))
-                 && same_pair (Follower.follow data.follower) follow)
-             in
-             if duplicate
-             then (
-               errors
-               := (name, Error.of_string "another file already follows this pair")
-                  :: !errors;
-               return ())
-             else (
-               match existing with
-               | Some r when same_pair (Follower.follow r.follower) follow ->
-                 (match%map Follower.reconfigure r.follower follow with
-                  | Ok () -> Hashtbl.set t.running ~key:name ~data:{ r with contents }
-                  | Error err -> errors := (name, err) :: !errors)
-               | _ ->
-                 let%bind () =
-                   match existing with
-                   | None -> return ()
-                   | Some r ->
-                     Hashtbl.remove t.running name;
-                     Follower.stop r.follower
-                 in
-                 (match%map start_follower t follow with
-                  | Ok follower ->
-                    Hashtbl.set t.running ~key:name ~data:{ contents; follower }
-                  | Error err -> errors := (name, err) :: !errors))))
-    in
-    t.errors <- List.rev !errors;
-    List.iter t.errors ~f:(fun (file, error) ->
-      Log.Global.info_s [%message "follow file not applied" file (error : Error.t)])
+    Hashtbl.filter_keys_inplace t.failures ~f:(Set.mem present);
+    Deferred.List.iter ~how:`Sequential files ~f:(apply_file t)
 ;;
 
 let scan t =
@@ -196,13 +277,27 @@ let metrics_text t =
        # TYPE hl_copy_rest_weight_total counter\n\
        hl_copy_rest_weight_total %d\n"
       (Hashtbl.length t.running)
-      (List.length t.errors)
+      (List.length (errors t))
       (Rate_limit.taken t.rate_limit)
 ;;
 
 let status_json t =
   `Assoc
-    [ "followers", `List (List.map (followers t) ~f:Follower.status_json)
+    [ ( "followers"
+      , `List
+          (List.map (followers t) ~f:Follower.status_json
+           @ (Hashtbl.to_alist t.failures
+              |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+              |> List.filter_map ~f:(fun (_, (f : failure)) ->
+                Option.map f.follow ~f:(fun (follow : Follower_config.t) ->
+                  `Assoc
+                    [ "follower", `String (Address.to_string follow.follower)
+                    ; "leader", `String (Address.to_string follow.leader)
+                    ; "state", `String "error"
+                    ; "pnl", `Float 0.
+                    ; "positions", `List []
+                    ; "last_error", `String (Error.to_string_hum f.error)
+                    ])))) )
     ; ( "leaders"
       , `List
           (List.map (Leader_hub.leaders t.hub) ~f:(fun (leader, source, consumers) ->
@@ -217,7 +312,7 @@ let status_json t =
                ])) )
     ; ( "errors"
       , `List
-          (List.map t.errors ~f:(fun (file, err) ->
+          (List.map (errors t) ~f:(fun (file, err) ->
              `Assoc [ "file", `String file; "error", `String (Error.to_string_hum err) ]))
       )
     ; "rest_weight", `Int (Rate_limit.taken t.rate_limit)
@@ -266,7 +361,8 @@ let start ?port (config : Config.t) =
             config.api
       ; rate_limit
       ; running = String.Table.create ()
-      ; errors = []
+      ; failures = String.Table.create ()
+      ; dir_error = None
       ; http = None
       ; scanning = Sequencer.create ~continue_on_error:true ()
       ; stopped = Ivar.create ()
