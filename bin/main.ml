@@ -106,8 +106,44 @@ let run_command =
            "VAR environment variable holding one agent key for every follow (development)"
      and unsigned =
        flag "-unsigned" no_arg ~doc:" send unsigned orders (hl-sim only, X-Address)"
+     and builder =
+       flag
+         "-builder"
+         (optional string)
+         ~doc:
+           "ADDRESS builder address put on follower orders when the follower has \
+            approved the fee"
+     and builder_fee_tenths_bp =
+       flag
+         "-builder-fee-tenths-bp"
+         (optional int)
+         ~doc:"N builder fee in tenths of a basis point, 1 to 100 (requires -builder)"
      in
      fun () ->
+       let builder =
+         match builder, builder_fee_tenths_bp with
+         | None, None -> None
+         | Some address, Some fee_tenths_bp when fee_tenths_bp > 0 && fee_tenths_bp <= 100
+           ->
+           (* [Address.of_string] accepts any string; check the 0x + 40 hex shape here. *)
+           let is_hex c = Char.is_digit c || Char.between (Char.lowercase c) ~low:'a' ~high:'f' in
+           if String.length address = 42
+              && String.is_prefix address ~prefix:"0x"
+              && String.for_all (String.drop_prefix address 2) ~f:is_hex
+           then
+             Some
+               { Hl_protocol.Builder_fee.builder = Hl_protocol.Address.of_string address
+               ; fee_tenths_bp
+               }
+           else (
+             Core.eprintf "-builder: %S is not a 0x-prefixed 40-digit hex address\n" address;
+             Stdlib.exit 2)
+         | _ ->
+           (* Perps cap builder fees at 0.1%, 100 tenths of a basis point. *)
+           Core.eprintf
+             "pass -builder and -builder-fee-tenths-bp together, with a fee of 1 to 100\n";
+           Stdlib.exit 2
+       in
        let signer_for, agent_of =
          match state_dir, agent_key_env, unsigned with
          | Some state_dir, None, false ->
@@ -141,6 +177,7 @@ let run_command =
            ~configs_dir
            ~signer_for
            ?agent_of
+           ?builder
            ()
        in
        match%bind Engine.start ~port config with
@@ -152,7 +189,8 @@ let run_command =
            [%message
              "engine started"
                ~port:(Engine.port engine : int option)
-               ~followers:(List.length (Engine.followers engine) : int)];
+               ~followers:(List.length (Engine.followers engine) : int)
+               (builder : Hl_protocol.Builder_fee.t option)];
          (* Command.async does not run at_shutdown handlers on SIGTERM by itself; the
             journals must be flushed. *)
          Shutdown.at_shutdown (fun () -> Engine.stop engine);
