@@ -88,16 +88,16 @@ let run_command =
          "-leader-poll-s"
          (optional_with_default 5 int)
          ~doc:"S poll interval of leaders past -max-ws-leaders (default 5)"
-     and agent_keys_dir =
+     and state_dir =
        flag
-         "-agent-keys-dir"
+         "-state-dir"
          (optional string)
-         ~doc:"DIR hl-copy-api's sealed agent key files (<owner>.sexp)"
+         ~doc:"DIR the API's state directory; agent keys from DIR/agents/<account>.key"
      and master_key_env =
        flag
          "-master-key-env"
          (optional_with_default "HL_COPY_MASTER_KEY" string)
-         ~doc:"VAR master key of -agent-keys-dir (default HL_COPY_MASTER_KEY)"
+         ~doc:"VAR master key of the key store (default HL_COPY_MASTER_KEY)"
      and agent_key_env =
        flag
          "-agent-key-env"
@@ -109,21 +109,24 @@ let run_command =
      in
      fun () ->
        let signer_for =
-         match agent_keys_dir, agent_key_env, unsigned with
-         | Some dir, None, false ->
-           (match Hl_copy_keystore.Sealed.Master_key.of_env ~var:master_key_env () with
+         match state_dir, agent_key_env, unsigned with
+         | Some state_dir, None, false ->
+           (match Hl_copy_core.Key_store.Master_key.of_env ~var:master_key_env () with
             | Error _ ->
               Core.eprintf "%s is not set to a 64-digit hex master key\n" master_key_env;
               Stdlib.exit 2
-            | Ok master ->
-              Key_source.keystore_signer (Hl_copy_keystore.Agent_keys.create ~dir master))
+            | Ok master_key ->
+              (match Hl_copy_core.Key_store.create ~master_key ~state_dir () with
+               | Error err ->
+                 Core.eprintf "%s\n" (Error.to_string_hum err);
+                 Stdlib.exit 2
+               | Ok keys -> Key_source.keystore_signer keys))
          | None, Some var, false ->
            let signer = Follower.Signer.Agent (key_of_env var) in
            fun _ -> return (Ok signer)
          | None, None, true -> fun _ -> return (Ok Follower.Signer.Unsigned)
          | _ ->
-           Core.eprintf
-             "pass exactly one of -agent-keys-dir, -agent-key-env and -unsigned\n";
+           Core.eprintf "pass exactly one of -state-dir, -agent-key-env and -unsigned\n";
            Stdlib.exit 2
        in
        let config =
