@@ -9,7 +9,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # hl-sim runs in the integration tests and needs order-book, exchange-core-engine,
-      # price-anchor and binance-client.
+      # price-anchor and binance-client (which needs mm-core).
       - uses: winterchill-trading/infra/.github/actions/ox-setup@main
         with:
           pins: |
@@ -21,6 +21,7 @@ jobs:
             venue-net https://github.com/winterchill-trading/venue-net.git
             hl-client https://github.com/winterchill-trading/hl-client.git
             hl-copy-core https://github.com/winterchill-trading/hl-copy-core.git
+            mm-core https://github.com/winterchill-trading/mm-core.git
             binance-protocol https://github.com/winterchill-trading/binance-protocol.git
             binance-client https://github.com/winterchill-trading/binance-client.git
             order-book https://github.com/winterchill-trading/order-book.git
