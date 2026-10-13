@@ -9,7 +9,6 @@
   hl-protocol
   hl-client
   hl-copy-core
-  hl-copy-keystore
   market-data
   uri
   yojson)

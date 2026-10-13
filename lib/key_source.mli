@@ -1,17 +1,19 @@
-(** Agent keys for followers, from hl-copy-api's key store ({!Hl_copy_keystore}): the API
-    seals each user's agent key under the master key ([HL_COPY_MASTER_KEY]) in
-    [<dir>/<owner>.sexp]; the engine opens the user's [Active] agent in memory when a
+(** Agent keys for followers, from the key store the API writes
+    ({!Hl_copy_core.Key_store}: [<state_dir>/agents/<account>.key], sealed under
+    [HL_COPY_MASTER_KEY]). The engine opens the follower's agent in memory when the
     follower starts. Keys are never logged. *)
 
 open! Core
 open! Async
 open Hl_copy_core
 
-(** The signer of [follow.follower]'s active agent. Fails when the user has no active
-    agent, or when it expired ([valid_until_ms] before [now]); the user must approve a new
-    one, after which the follow file's next change restarts the follower with it. *)
+(** The signer of [follow.follower]'s agent. Fails when the account has no agent (never
+    approved, or revoked), when it expired ([valid_until] before [now]), or when the file
+    does not open; the follow then does not start, and the error shows in [/status]. The
+    user approves a new agent, after which the follow file's next change starts the
+    follower with it. *)
 val keystore_signer
   :  ?now:(unit -> Time_ns.t)
-  -> Hl_copy_keystore.Agent_keys.t
+  -> Key_store.t
   -> Follower_config.t
   -> Follower.Signer.t Or_error.t Deferred.t

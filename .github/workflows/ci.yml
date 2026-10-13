@@ -19,7 +19,6 @@ jobs:
             parquet https://github.com/winterchill-trading/parquet.git
             market-data https://github.com/winterchill-trading/market-data.git
             hl-protocol https://github.com/winterchill-trading/hl-protocol.git
-            hl-copy-keystore https://github.com/winterchill-trading/hl-copy-api.git
             venue-net https://github.com/winterchill-trading/venue-net.git
             hl-client https://github.com/winterchill-trading/hl-client.git
             hl-copy-core https://github.com/winterchill-trading/hl-copy-core.git

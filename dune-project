@@ -36,6 +36,5 @@
   market-data
   hl-client
   hl-copy-core
-  hl-copy-keystore
   (hl-sim :with-test)
   (exchange-core-engine :with-test)))
