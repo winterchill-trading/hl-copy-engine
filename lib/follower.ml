@@ -75,6 +75,7 @@ type t =
   ; mutable source : Leader_hub.Source.t option
   ; mutable last_resync : Time_ns.t option
   ; mutable drop_leader_updates : bool
+  ; mutable last_error : string option
   ; stopped : unit Ivar.t
   }
 
@@ -122,6 +123,10 @@ let update_pnl_metrics t =
    Order results are applied the same way, inside the same sequencer job. *)
 let rec apply t ?lag_from input =
   let time = now t in
+  (match input with
+   | Follower_core.Input.Order_rejected { message; _ } -> t.last_error <- Some message
+   | Mirror (Follower_fill _) -> t.last_error <- None
+   | _ -> ());
   Option.iter t.journal ~f:(fun j -> Journal.Writer.input j ~time input);
   let core, (output : Follower_core.Output.t) = Follower_core.apply t.core input in
   t.core <- core;
@@ -269,6 +274,7 @@ and resync t =
   with
   | Error err ->
     t.metrics.resync_failures <- t.metrics.resync_failures + 1;
+    t.last_error <- Some ("resync failed: " ^ Error.to_string_hum err);
     Log.Global.info_s
       [%message "resync failed" ~follower:(follower : Address.t) (err : Error.t)];
     return ()
@@ -440,6 +446,7 @@ let start
     ; source = None
     ; last_resync = None
     ; drop_leader_updates = false
+    ; last_error = None
     ; stopped = Ivar.create ()
     }
   in
@@ -509,12 +516,65 @@ let sizes_json m =
      |> List.map ~f:(fun (s, x) -> Symbol.to_string s, `String (Size.to_string x)))
 ;;
 
+let agent_address t =
+  match t.config.signer with
+  | Agent key -> Some (Hl_client.Signing.Private_key.address key)
+  | Hook _ | Unsigned -> None
+;;
+
+let last_error t =
+  match t.last_error, t.core.status with
+  | Some e, _ -> Some e
+  | None, Paused reason -> Some ("paused: " ^ reason)
+  | None, (Running | Stopped) -> None
+;;
+
+(* The follower's positions with their attributed entry price and pnl, in the shape
+   hl-copy-api's [/me] reads: numbers, not strings. *)
+let positions_json t =
+  let m = t.core.mirror in
+  let equity = Usd.to_float m.follower_equity in
+  `List
+    (Map.to_alist m.follower_positions
+     |> List.map ~f:(fun (symbol, size) ->
+       let p = Pnl.position t.pnl ~leader:t.core.follow.leader symbol in
+       let mark = Map.find m.marks symbol in
+       let unrealized =
+         Option.value_map mark ~default:0. ~f:(fun mark ->
+           Usd.to_float (Pnl.Position.unrealized p ~mark))
+       in
+       let leverage =
+         match mark with
+         | Some mark when Float.(equity > 0.) ->
+           Usd.to_float (Caps.notional size mark) /. equity
+         | _ -> 0.
+       in
+       `Assoc
+         [ "coin", `String (Symbol.to_string symbol)
+         ; "size", `Float (Size.to_float size)
+         ; "entry_px", `Float (Price.to_float p.avg_entry)
+         ; "unrealized_pnl", `Float unrealized
+         ; "leverage", `Float leverage
+         ]))
+;;
+
 let status_json t =
   let core = t.core in
   let m = core.mirror in
   `Assoc
     [ "follower", `String (Address.to_string core.follow.follower)
     ; "leader", `String (Address.to_string core.follow.leader)
+    ; "state", `String (Follower_core.Status.to_string core.status)
+    ; "pnl", `Float (t.metrics.realized_pnl +. t.metrics.unrealized_pnl)
+    ; "positions", positions_json t
+    ; ( "last_error"
+      , match last_error t with
+        | None -> `Null
+        | Some e -> `String e )
+    ; ( "agent"
+      , match agent_address t with
+        | None -> `Null
+        | Some a -> `String (Address.to_string a) )
     ; "status", `String (Follower_core.Status.to_string core.status)
     ; ( "reason"
       , match core.status with

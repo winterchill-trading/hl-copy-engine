@@ -83,7 +83,16 @@ val stop : t -> unit Deferred.t
     answered. *)
 val idle : t -> unit Deferred.t
 
-(** For [/status]. *)
+(** The address of the agent signing this follower's orders, when it is a key. *)
+val agent_address : t -> Address.t option
+
+(** The last reject or resync error (cleared by the next fill), or the pause reason. *)
+val last_error : t -> string option
+
+(** For [/status]: [follower], [leader], [state] (running, paused, stopped), [pnl]
+    (attributed realized plus unrealized, USD), [positions] (a list of [coin], [size],
+    [entry_px], [unrealized_pnl], [leverage], all numbers), [last_error], and details
+    (equities, both positions maps, margin cap, last resync, metrics). *)
 val status_json : t -> Yojson.Safe.t
 
 module For_testing : sig
