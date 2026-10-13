@@ -84,11 +84,17 @@ let%expect_test "prometheus text" =
     # HELP hl_copy_equity_change_usd Follower equity minus its equity at start.
     # TYPE hl_copy_equity_change_usd gauge
     hl_copy_equity_change_usd{follower="0x00000000000000000000000000000000000000f1",leader="0x1eade50000000000000000000000000000000000"} 0
+    # HELP hl_copy_builder_fee_orders_total Orders sent with the builder fee.
+    # TYPE hl_copy_builder_fee_orders_total counter
+    hl_copy_builder_fee_orders_total{follower="0x00000000000000000000000000000000000000f1",leader="0x1eade50000000000000000000000000000000000"} 0
+    # HELP hl_copy_builder_fee_skipped_total Orders sent without the builder fee because the follower has not approved it.
+    # TYPE hl_copy_builder_fee_skipped_total counter
+    hl_copy_builder_fee_skipped_total{follower="0x00000000000000000000000000000000000000f1",leader="0x1eade50000000000000000000000000000000000"} 0
     # HELP hl_copy_paused 1 when the follow is paused or stopped.
     # TYPE hl_copy_paused gauge
     hl_copy_paused{follower="0x00000000000000000000000000000000000000f1",leader="0x1eade50000000000000000000000000000000000"} 0
     |}];
   print_endline (Yojson.Safe.to_string (Metrics.to_json t));
   [%expect
-    {| {"leader_updates":4,"orders":3,"fills":2,"rejects":{"margin":1,"no_liquidity":2},"resyncs":0,"resync_failures":0,"resync_repairs":0,"lag_ms":{"count":1,"p50":12.0,"p99":12.0,"max":12.0},"slippage_bps":{"count":1,"p50":1.5,"p99":1.5,"max":1.5},"realized_pnl":-2.25,"unrealized_pnl":0.0,"equity_change":0.0} |}]
+    {| {"leader_updates":4,"orders":3,"fills":2,"rejects":{"margin":1,"no_liquidity":2},"resyncs":0,"resync_failures":0,"resync_repairs":0,"lag_ms":{"count":1,"p50":12.0,"p99":12.0,"max":12.0},"slippage_bps":{"count":1,"p50":1.5,"p99":1.5,"max":1.5},"realized_pnl":-2.25,"unrealized_pnl":0.0,"equity_change":0.0,"builder_fee_orders":0,"builder_fee_skipped":0} |}]
 ;;

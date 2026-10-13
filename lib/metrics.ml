@@ -63,6 +63,8 @@ type t =
   ; mutable unrealized_pnl : float
   ; mutable equity_change : float
   ; mutable paused : bool
+  ; mutable builder_fee_orders : int
+  ; mutable builder_fee_skipped : int
   }
 [@@deriving sexp_of]
 
@@ -80,6 +82,8 @@ let create () =
   ; unrealized_pnl = 0.
   ; equity_change = 0.
   ; paused = false
+  ; builder_fee_orders = 0
+  ; builder_fee_skipped = 0
   }
 ;;
 
@@ -144,6 +148,14 @@ let prometheus follows =
     t.unrealized_pnl);
   gauge "hl_copy_equity_change_usd" "Follower equity minus its equity at start." (fun t ->
     t.equity_change);
+  counter
+    "hl_copy_builder_fee_orders_total"
+    "Orders sent with the builder fee."
+    (fun t -> t.builder_fee_orders);
+  counter
+    "hl_copy_builder_fee_skipped_total"
+    "Orders sent without the builder fee because the follower has not approved it."
+    (fun t -> t.builder_fee_skipped);
   gauge "hl_copy_paused" "1 when the follow is paused or stopped." (fun t ->
     if t.paused then 1. else 0.);
   Buffer.contents buf
@@ -177,5 +189,7 @@ let to_json t =
     ; "realized_pnl", `Float t.realized_pnl
     ; "unrealized_pnl", `Float t.unrealized_pnl
     ; "equity_change", `Float t.equity_change
+    ; "builder_fee_orders", `Int t.builder_fee_orders
+    ; "builder_fee_skipped", `Int t.builder_fee_skipped
     ]
 ;;

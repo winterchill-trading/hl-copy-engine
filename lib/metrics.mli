@@ -35,6 +35,9 @@ type t =
   ; mutable unrealized_pnl : float
   ; mutable equity_change : float (** follower equity minus its equity at start *)
   ; mutable paused : bool
+  ; mutable builder_fee_orders : int (** orders sent with the [builder] field *)
+  ; mutable builder_fee_skipped : int
+  (** orders sent without it because the follower has not approved the fee *)
   }
 [@@deriving sexp_of]
 
