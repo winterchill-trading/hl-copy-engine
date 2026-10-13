@@ -169,11 +169,14 @@ let check_agent t name (r : running) =
           "agent changed, restarting the follower"
             ~follower:((Follower.follow r.follower).follower : Address.t)];
       let follow = Follower.follow r.follower in
-      Hashtbl.remove t.running name;
+      (* The stopped follower stays listed until its replacement is up, so [/status] never
+         loses the follow in between. *)
       let%bind () = Follower.stop r.follower in
       match%map start_follower t follow with
       | Ok follower -> Hashtbl.set t.running ~key:name ~data:{ r with follower }
-      | Error err -> fail t name ~contents:r.contents ~follow err)
+      | Error err ->
+        Hashtbl.remove t.running name;
+        fail t name ~contents:r.contents ~follow err)
 ;;
 
 let apply_file t (name, contents) =
