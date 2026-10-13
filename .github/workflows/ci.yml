@@ -1,0 +1,33 @@
+name: ci
+on: [push, pull_request]
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # hl-sim runs in the integration tests and needs order-book, exchange-core-engine,
+      # price-anchor and binance-client.
+      - uses: winterchill-trading/infra/.github/actions/ox-setup@main
+        with:
+          pins: |
+            fixed-decimal https://github.com/winterchill-trading/fixed-decimal.git
+            exchange-core https://github.com/winterchill-trading/exchange-core.git
+            parquet https://github.com/winterchill-trading/parquet.git
+            market-data https://github.com/winterchill-trading/market-data.git
+            hl-protocol https://github.com/winterchill-trading/hl-protocol.git
+            venue-net https://github.com/winterchill-trading/venue-net.git
+            hl-client https://github.com/winterchill-trading/hl-client.git
+            hl-copy-core https://github.com/winterchill-trading/hl-copy-core.git
+            binance-protocol https://github.com/winterchill-trading/binance-protocol.git
+            binance-client https://github.com/winterchill-trading/binance-client.git
+            order-book https://github.com/winterchill-trading/order-book.git
+            exchange-core-engine https://github.com/winterchill-trading/exchange-core.git
+            price-anchor https://github.com/winterchill-trading/price-anchor.git
+            hl-sim https://github.com/winterchill-trading/hl-sim.git
+      - run: opam exec -- dune build
+      - run: opam exec -- dune test
+  obj-magic:
+    uses: winterchill-trading/infra/.github/workflows/obj-magic.yml@main
