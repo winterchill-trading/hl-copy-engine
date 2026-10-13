@@ -8,7 +8,14 @@ type t =
   ; base_url : Uri.t
   }
 
-let maker = Address.of_string "0x00000000000000000000000000000000000000b0"
+let key byte =
+  Hl_client.Signing.Private_key.of_hex
+    (String.concat (List.init 32 ~f:(fun _ -> sprintf "%02x" byte)))
+  |> ok_exn
+;;
+
+let maker_key = key 0x44
+let maker = Hl_client.Signing.Private_key.address maker_key
 let config t ?address () = Hl_client.Config.create ?address ~base_url:t.base_url ()
 
 let asset coin =
@@ -30,8 +37,9 @@ let order ~coin ~is_buy ~px ~sz ~tif =
   }
 ;;
 
-let send t ~address orders =
-  match%map Hl_client.Exchange.place_orders (config t ~address ()) orders with
+let send ?key t ~address orders =
+  let client = Hl_client.Client.trading ?key (config t ~address ()) in
+  match%map Hl_client.Client.place_orders client orders with
   | Ok (Ok (Order statuses)) ->
     List.iter statuses ~f:(function
       | Error message -> raise_s [%message "order failed" message]
@@ -41,17 +49,18 @@ let send t ~address orders =
 ;;
 
 let rest t ~coin ~is_buy ~px ~sz =
-  send t ~address:maker [ order ~coin ~is_buy ~px ~sz ~tif:Gtc ]
+  send ~key:maker_key t ~address:maker [ order ~coin ~is_buy ~px ~sz ~tif:Gtc ]
 ;;
 
-let trade t ~address ~coin ~is_buy ~sz =
+let trade ?key t ~address ~coin ~is_buy ~sz =
   let px = if is_buy then "101000" else "99000" in
-  send t ~address [ order ~coin ~is_buy ~px ~sz ~tif:Ioc ]
+  send ?key t ~address [ order ~coin ~is_buy ~px ~sz ~tif:Ioc ]
 ;;
 
-let start ?config () =
+let start ?(strict = false) () =
   Log.Global.set_output [];
-  let server = Hl_sim.Server.create ?config (Hl_sim.Adapt.create_exchange ()) in
+  let config = { Hl_sim.Server.Config.default with strict_signatures = strict } in
+  let server = Hl_sim.Server.create ~config (Hl_sim.Adapt.create_exchange ()) in
   let%bind http = Hl_sim.Server.listen server ~port:0 in
   let base_url =
     Uri.make ~scheme:"http" ~host:"127.0.0.1" ~port:(Hl_sim.Server.port http) ()
@@ -59,6 +68,7 @@ let start ?config () =
   let t = { server; http; base_url } in
   let%map () =
     send
+      ~key:maker_key
       t
       ~address:maker
       (List.concat_map (List.range 0 10) ~f:(fun i ->

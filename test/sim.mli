@@ -11,16 +11,23 @@ type t =
   }
 
 (** Starts the server with a static BTC book from {!maker}: ten levels of 2 BTC each side,
-    bids from 99990 down and asks from 100010 up, 10 apart. *)
-val start : ?config:Hl_sim.Server.Config.t -> unit -> t Deferred.t
+    bids from 99990 down and asks from 100010 up, 10 apart. With [strict], every request
+    must be signed ([-strict-signatures]). *)
+val start : ?strict:bool -> unit -> t Deferred.t
+
+(** A throwaway key made of one repeated hex digit pair, e.g. [key 0x11]. Never funded
+    anywhere but the simulator. *)
+val key : int -> Hl_client.Signing.Private_key.t
 
 val stop : t -> unit Deferred.t
 val config : t -> ?address:Address.t -> unit -> Hl_client.Config.t
 val maker : Address.t
 
-(** An unsigned IOC acting for [address] ([X-Address]), 1% through 100000. *)
+(** An IOC 1% through 100000 for [address]: unsigned ([X-Address]), or signed with [key]
+    (whose address is then the account). *)
 val trade
-  :  t
+  :  ?key:Hl_client.Signing.Private_key.t
+  -> t
   -> address:Address.t
   -> coin:string
   -> is_buy:bool
