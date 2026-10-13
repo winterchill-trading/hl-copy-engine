@@ -173,3 +173,104 @@ let%expect_test "the engine refuses mainnet" =
   [%expect {| true |}];
   return ()
 ;;
+
+let%expect_test "key store: no agent, then an agent, revoke pauses, rotation restarts" =
+  let%bind sim = Sim.start ~strict:true () in
+  let dir = Filename_unix.temp_dir "hl-copy-follows" "" in
+  let state_dir = Filename_unix.temp_dir "hl-copy-state" "" in
+  (* A throwaway master key. *)
+  let master_key = ok_exn (Key_store.Master_key.of_hex (String.make 64 'a')) in
+  let keys = ok_exn (Key_store.create ~master_key ~state_dir ()) in
+  let put key_byte =
+    let key = Sim.key key_byte in
+    let%map () =
+      Hl_client.Client.approve_agent
+        (Hl_client.Client.trading ~key:user_key (Sim.config sim ()))
+        ~agent_address:(Signing.Private_key.address key)
+        ~agent_name:(sprintf "copy-%x" key_byte)
+      >>| ok_exn
+      >>| ignore
+    in
+    ignore
+      (ok_exn
+         (Key_store.put
+            keys
+            ~account:user
+            ~agent_address:(Signing.Private_key.address key)
+            ~agent_name:(sprintf "copy-%x" key_byte)
+            ~created:(Time_ns.now ())
+            ~private_key:
+              (String.concat (List.init 32 ~f:(fun _ -> sprintf "%02x" key_byte)))
+            ())
+       : Key_store.Entry.t)
+  in
+  let follow = Follower_config.create ~follower:user ~leader () in
+  let%bind () = write dir follow in
+  let config =
+    Engine.Config.create
+      ~scan_interval:(Time_ns.Span.of_int_ms 100)
+      ~agent_of:(Key_source.agent_of keys)
+      ~api:(Sim.config sim ())
+      ~configs_dir:dir
+      ~signer_for:(Key_source.keystore_signer keys)
+      ()
+  in
+  let%bind engine = Engine.start config >>| ok_exn in
+  let state () =
+    let open Yojson.Safe.Util in
+    let f = Engine.status_json engine |> member "followers" |> index 0 in
+    ( f |> member "state" |> to_string
+    , f |> member "last_error" |> to_string_option
+    , f |> member "agent" |> to_string_option )
+  in
+  print_s [%sexp (state () : string * string option * string option)];
+  [%expect
+    {|
+    (error
+     ("(\"no agent\" (follower 0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a))") ())
+    |}];
+  let%bind () = put 0x22 in
+  let%bind () =
+    Sim.wait_until ~what:"started" (fun () ->
+      return (not (List.is_empty (Engine.followers engine))))
+  in
+  print_s [%sexp (state () : string * string option * string option)];
+  [%expect {| (running () (0x1563915e194d8cfba1943570603f7606a3115508)) |}];
+  ok_exn (Key_store.revoke keys ~account:user);
+  let%bind () =
+    Sim.wait_until ~what:"paused" (fun () ->
+      let s, _, _ = state () in
+      return (String.equal s "paused"))
+  in
+  print_s [%sexp (state () : string * string option * string option)];
+  [%expect
+    {|
+    (paused ("paused: agent revoked")
+     (0x1563915e194d8cfba1943570603f7606a3115508))
+    |}];
+  let%bind () = put 0x55 in
+  let%bind () =
+    Sim.wait_until ~what:"restarted with the new agent" (fun () ->
+      match state () with
+      | "running", _, Some agent ->
+        return
+          (String.equal
+             agent
+             (Address.to_string (Signing.Private_key.address (Sim.key 0x55))))
+      | _ -> return false)
+  in
+  print_s [%sexp (state () : string * string option * string option)];
+  [%expect {| (running () (0xe1fae9b4fab2f5726677ecfa912d96b0b683e6a9)) |}];
+  (* The new agent trades: the leader's position is copied. *)
+  let%bind () =
+    Sim.trade ~key:leader_key sim ~address:leader ~coin:"BTC" ~is_buy:true ~sz:"0.2"
+  in
+  let%bind () =
+    Sim.wait_until ~what:"follower copies" (fun () ->
+      return (Size.equal (Sim.position sim user "BTC") (Size.of_string "0.2")))
+  in
+  positions sim;
+  [%expect {| leader 0.2 follower 0.2 |}];
+  let%bind () = Engine.stop engine in
+  Sim.stop sim
+;;
