@@ -13,7 +13,8 @@
       no order is placed. A place the mirror planned is dropped and closed in the mirror
       at once, so it never counts as in flight. Pausing cancels every open order of the
       follow (IOC orders are normally already gone, so this is a safety net).
-    - Stopped: like paused, and final; later inputs other than [Configure] change nothing.
+    - Stopped: like paused, and later inputs change nothing until a [Configure], which
+      starts a new run (a restart replaying the journal) from the mirror state as it was.
     - Insufficient margin: the account leverage the follower holds when the reject arrives
       becomes a leverage cap (on top of the configured one), so the mirror stops growing
       positions it cannot pay for; the rejected notional is added to [shortfall]. A

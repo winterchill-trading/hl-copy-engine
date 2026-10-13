@@ -246,7 +246,17 @@ let configure t ~follow ~specs =
   in
   let t = lift_cap { t with follow; specs } in
   match t.status with
-  | Stopped -> t, Output.empty
+  | Stopped ->
+    (* A new run on top of a stopped journal: the mirror state (and with it the client
+       order id sequence) carries over. *)
+    let t =
+      { t with
+        status = (if follow.paused then Paused "config" else Running)
+      ; consecutive_rejects = 0
+      }
+    in
+    let mirror, plan = Mirror.rebalance t.mirror in
+    gate { t with mirror } plan
   | Running when follow.paused -> pause t "config"
   | Paused _ when was_paused_by_config && not follow.paused -> resume t
   | Running | Paused _ ->
