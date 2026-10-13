@@ -32,3 +32,8 @@ let keystore_signer ?(now = Time_ns.now) keys (follow : Follower_config.t) =
            "the sealed key does not match the agent address"
              ~agent:(entry.agent_address : Address.t)])
 ;;
+
+let agent_of keys (follow : Follower_config.t) =
+  Key_store.find keys ~account:follow.follower
+  |> Or_error.map ~f:(Option.map ~f:(fun (e : Key_store.Entry.t) -> e.agent_address))
+;;

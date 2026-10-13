@@ -17,3 +17,7 @@ val keystore_signer
   -> Key_store.t
   -> Follower_config.t
   -> Follower.Signer.t Or_error.t Deferred.t
+
+(** The address of the account's current agent, without decrypting it; [None] once the API
+    revoked it. For {!Engine.Config.agent_of}. *)
+val agent_of : Key_store.t -> Follower_config.t -> Address.t option Or_error.t
