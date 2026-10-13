@@ -1,9 +1,9 @@
 (** Leader position updates, shared by every follower of a leader.
 
     Hyperliquid serves user subscriptions for at most 10 distinct addresses per IP, so the
-    hub keeps one websocket ({!Hl_client.User_feed}) carrying one [userFills]
-    subscription per leader address, whatever the number of followers (the feed fans each
-    address out to its consumers). Leaders beyond [max_ws_users] are polled instead: one
+    hub keeps one websocket ({!Hl_client.User_feed}) carrying one [userFills] subscription
+    per leader address, whatever the number of followers (the feed fans each address out
+    to its consumers). Leaders beyond [max_ws_users] are polled instead: one
     [clearinghouseState] request per leader every [poll_interval], paced by the shared
     {!Rate_limit} bucket and fanned out the same way.
 

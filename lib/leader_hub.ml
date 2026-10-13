@@ -43,21 +43,24 @@ module Poller = struct
     in
     let previous = Option.value previous ~default:(Map.empty (module Coin)) in
     let opened_or_moved =
-      Map.fold now ~init:[] ~f:(fun ~key:coin ~data:(p : Clearinghouse_state.Position.t) acc ->
-        match Map.find previous coin with
-        | Some szi when Size.equal szi p.szi -> acc
-        | _ ->
-          let mark =
-            if Size.is_zero p.szi
-            then None
-            else
-              (* A mark estimate only (the IOC limit is rounded to the tick later), so
-                 the float rounding is harmless. *)
-              Some
-                ((Price.of_float [@alert "-lossy"])
-                   (Usd.to_float p.position_value /. Float.abs (Size.to_float p.szi)))
-          in
-          Update.Position { coin; szi = p.szi; mark; fill_time_ms = None } :: acc)
+      Map.fold
+        now
+        ~init:[]
+        ~f:(fun ~key:coin ~data:(p : Clearinghouse_state.Position.t) acc ->
+          match Map.find previous coin with
+          | Some szi when Size.equal szi p.szi -> acc
+          | _ ->
+            let mark =
+              if Size.is_zero p.szi
+              then None
+              else
+                (* A mark estimate only (the IOC limit is rounded to the tick later), so
+                   the float rounding is harmless. *)
+                Some
+                  ((Price.of_float [@alert "-lossy"])
+                     (Usd.to_float p.position_value /. Float.abs (Size.to_float p.szi)))
+            in
+            Update.Position { coin; szi = p.szi; mark; fill_time_ms = None } :: acc)
     in
     let closed =
       Map.fold previous ~init:[] ~f:(fun ~key:coin ~data:_ acc ->
@@ -150,7 +153,8 @@ let poll_loop t ~leader (poller : Poller.t) =
          poller.last <- Some now;
          List.iter updates ~f:(Poller.broadcast poller)
        | Error err ->
-         Log.Global.info_s [%message "leader poll failed" (leader : Address.t) (err : Error.t)]);
+         Log.Global.info_s
+           [%message "leader poll failed" (leader : Address.t) (err : Error.t)]);
       let%bind () =
         Deferred.any
           [ Time_source.after t.time_source t.poll_interval; Ivar.read poller.stopped ]
@@ -179,7 +183,8 @@ let subscribe_polling t ~leader =
         (Update.Position { coin; szi; mark = None; fill_time_ms = None })));
   poller.consumers <- writer :: poller.consumers;
   upon (Pipe.closed reader) (fun () ->
-    poller.consumers <- List.filter poller.consumers ~f:(fun w -> not (phys_equal w writer));
+    poller.consumers
+    <- List.filter poller.consumers ~f:(fun w -> not (phys_equal w writer));
     if List.is_empty poller.consumers
     then (
       Ivar.fill_if_empty poller.stopped ();
