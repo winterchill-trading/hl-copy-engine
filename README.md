@@ -60,6 +60,8 @@ curl -s localhost:9930/metrics; curl -s localhost:9930/status
 | `-master-key-env VAR` | `HL_COPY_MASTER_KEY` | master key of the key store |
 | `-agent-key-env VAR` | | sign with the agent key in `VAR` (development: one agent for every follow) |
 | `-unsigned` | | send unsigned orders (hl-sim without `-strict-signatures` only) |
+| `-builder ADDRESS` | none | builder put on follower orders (with `-builder-fee-tenths-bp`) |
+| `-builder-fee-tenths-bp N` | none | builder fee, 1 to 100 tenths of a basis point (perps cap 0.1%) |
 | `-log-level` | info | `debug`, `info` or `error`, on stderr |
 
 `hl-copy-engine replay <journal-dir>/<follower>-<leader>` replays a follow's journal and
@@ -77,6 +79,18 @@ follower with the new key. The signer is a hook
 (`Engine.Config.signer_for`, returning `Follower.Signer.Agent key`, `Hook sign` or
 `Unsigned`), so tests and local runs can pass one key from the environment
 (`-agent-key-env`) instead. Keys are never logged or printed.
+
+## Builder fees
+
+With `-builder ADDRESS -builder-fee-tenths-bp N`, every follower reads `maxBuilderFee` for
+its account and that builder at start and on resyncs (every resync until the fee is
+approved, then every 5 minutes, since the request weighs 20). While the approved cap is at
+least `N`, follower orders carry `"builder": {"b": ADDRESS, "f": N}`; otherwise they go
+out without it, counted in `hl_copy_builder_fee_skipped_total`, with the reason in the
+follower's `/status` `builder.note`. A revoked approval shows up as an order refused over
+the builder fee: the follower drops the field at once, and the next resync checks again.
+The account approves the fee with its own wallet (`approveBuilderFee`; for local runs,
+`Hl_client.Client.approve_builder_fee`).
 
 ## How a follow runs
 
@@ -140,7 +154,9 @@ no_liquidity, agent, rate_limited, other), `hl_copy_resyncs_total`,
 (summary: leader fill, exchange time, to follower order sent), `hl_copy_slippage_bps`
 (summary: fill price against the mark, adverse positive), `hl_copy_realized_pnl_usd` and
 `hl_copy_unrealized_pnl_usd` (`Hl_copy_core.Pnl` attribution, before fees),
-`hl_copy_equity_change_usd`, `hl_copy_paused`; and per engine `hl_copy_followers`,
+`hl_copy_equity_change_usd`, `hl_copy_paused`, `hl_copy_builder_fee_orders_total` (orders
+sent with the builder field), `hl_copy_builder_fee_skipped_total` (orders sent without it
+because the follower has not approved the fee); and per engine `hl_copy_followers`,
 `hl_copy_config_errors`, `hl_copy_rest_weight_total`.
 
 `/status` (JSON): `{"followers": [...], "leaders": [...], "errors": [...]}`. Each
@@ -149,7 +165,9 @@ follower entry carries what hl-copy-api's `/me` reads, `follower`, `leader`, `st
 (attributed, USD), `positions` (`coin`, `size`, `entry_px`, `unrealized_pnl`, `leverage`,
 all numbers) and `last_error`, then details: its agent address, pause reason, the leader's source
 (websocket or polling), both equities and positions, pending orders, margin cap,
-shortfall, last resync and the metrics; the followed leaders with their follower counts;
+shortfall, last resync, the metrics and `builder` (`null` without `-builder`, else
+`address`, `fee_tenths_bp`, `approved`, `max_approved_tenths_bp` and a `note` saying why
+orders go out without the builder); the followed leaders with their follower counts;
 follow files that failed to apply.
 
 ## End-to-end run
@@ -203,6 +221,10 @@ script raises both.
   making the market, through ten leader decisions.
 - `test_key_source.ml`: the key store signer for missing, sealed, expired and
   wrong-master-key cases.
+- `test_builder_sim.ml`: hl-sim with a builder fee: orders go out without the builder
+  until the follower approves the fee, then carry it and the builder account is credited
+  1 bp of the notional; after a revoke the refused order marks the approval gone and the
+  retry goes out without it.
 - `test_engine.ml`: follow files start, pause, reconfigure and stop followers; `/metrics`
   and `/status`; mainnet refused.
 
@@ -227,9 +249,6 @@ the agent keys through `Engine.Config.signer_for`.
 
 ## Not done yet
 
-- Builder codes: the design reads `maxBuilderFee` at start and attaches the builder only
-  when approved; hl-client has no `maxBuilderFee` call yet, so the engine sends no builder
-  field.
 - Fees per fill: taken from resync equity, not from `userFills`; PnL attribution is
   before fees.
 - Address-based request limits, liquidation flags and a back-off of the resync interval
