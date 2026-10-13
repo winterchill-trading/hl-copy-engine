@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: shellcheck scripts/*.sh
       # hl-sim runs in the integration tests and needs order-book, exchange-core-engine,
       # price-anchor and binance-client (which needs mm-core).
       - uses: winterchill-trading/infra/.github/actions/ox-setup@main
