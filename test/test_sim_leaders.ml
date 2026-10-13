@@ -100,6 +100,9 @@ let%expect_test "a follower copies a simulated trend leader through ten decision
     if Size.(abs (position server user - target ()) <= lot) || resyncs >= 20
     then return resyncs
     else (
+      (* Let the noise traders refill the book first: a leader's sweep can empty one side,
+         and with time driven by hand nothing else would. *)
+      tick_market 5;
       let%bind () = Follower.resync_now follower in
       catch_up (resyncs + 1))
   in
