@@ -7,6 +7,7 @@ module Weight = struct
   let open_orders = 2
   let meta = 20
   let user_fills = 20
+  let max_builder_fee = 20
   let exchange ~batch = 1 + (batch / 40)
 end
 

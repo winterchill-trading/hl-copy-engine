@@ -17,6 +17,10 @@ module Weight : sig
   val meta : int
   val user_fills : int
 
+  (** [maxBuilderFee] is not in the weight-2 list of the docs, so it costs 20 like every
+      other info request. *)
+  val max_builder_fee : int
+
   (** [1 + batch / 40]. *)
   val exchange : batch:int -> int
 end
