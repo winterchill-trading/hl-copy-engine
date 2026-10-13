@@ -26,6 +26,7 @@
   async
   ppx_jane
   bin_prot
+  cohttp
   cohttp-async
   uri
   yojson
@@ -33,7 +34,6 @@
   exchange-core
   hl-protocol
   market-data
-  venue-net
   hl-client
   hl-copy-core
   (hl-sim :with-test)
