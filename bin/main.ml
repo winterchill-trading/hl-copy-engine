@@ -108,7 +108,7 @@ let run_command =
        flag "-unsigned" no_arg ~doc:" send unsigned orders (hl-sim only, X-Address)"
      in
      fun () ->
-       let signer_for =
+       let signer_for, agent_of =
          match state_dir, agent_key_env, unsigned with
          | Some state_dir, None, false ->
            (match Hl_copy_core.Key_store.Master_key.of_env ~var:master_key_env () with
@@ -120,11 +120,12 @@ let run_command =
                | Error err ->
                  Core.eprintf "%s\n" (Error.to_string_hum err);
                  Stdlib.exit 2
-               | Ok keys -> Key_source.keystore_signer keys))
+               | Ok keys ->
+                 Key_source.keystore_signer keys, Some (Key_source.agent_of keys)))
          | None, Some var, false ->
            let signer = Follower.Signer.Agent (key_of_env var) in
-           fun _ -> return (Ok signer)
-         | None, None, true -> fun _ -> return (Ok Follower.Signer.Unsigned)
+           (fun _ -> return (Ok signer)), None
+         | None, None, true -> (fun _ -> return (Ok Follower.Signer.Unsigned)), None
          | _ ->
            Core.eprintf "pass exactly one of -state-dir, -agent-key-env and -unsigned\n";
            Stdlib.exit 2
@@ -139,6 +140,7 @@ let run_command =
            ~api
            ~configs_dir
            ~signer_for
+           ?agent_of
            ()
        in
        match%bind Engine.start ~port config with
