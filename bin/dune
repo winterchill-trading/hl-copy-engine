@@ -1,0 +1,17 @@
+; The main module is [main] rather than [hl_copy_engine] so that it does not clash with
+; the library's wrapper module.
+
+(executable
+ (name main)
+ (public_name hl-copy-engine)
+ (libraries
+  async
+  core
+  core_unix.command_unix
+  hl-client
+  hl-copy-core
+  hl-copy-engine
+  hl-protocol
+  uri)
+ (preprocess
+  (pps ppx_jane)))
