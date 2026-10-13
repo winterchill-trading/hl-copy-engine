@@ -4,6 +4,8 @@
  (libraries
   core
   async
+  cohttp
+  cohttp-async
   hl-protocol
   hl-client
   hl-copy-core
