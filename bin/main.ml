@@ -88,21 +88,42 @@ let run_command =
          "-leader-poll-s"
          (optional_with_default 5 int)
          ~doc:"S poll interval of leaders past -max-ws-leaders (default 5)"
+     and agent_keys_dir =
+       flag
+         "-agent-keys-dir"
+         (optional string)
+         ~doc:"DIR hl-copy-api's sealed agent key files (<owner>.sexp)"
+     and master_key_env =
+       flag
+         "-master-key-env"
+         (optional_with_default "HL_COPY_MASTER_KEY" string)
+         ~doc:"VAR master key of -agent-keys-dir (default HL_COPY_MASTER_KEY)"
      and agent_key_env =
        flag
          "-agent-key-env"
          (optional string)
-         ~doc:"VAR environment variable holding the agent key"
+         ~doc:
+           "VAR environment variable holding one agent key for every follow (development)"
      and unsigned =
        flag "-unsigned" no_arg ~doc:" send unsigned orders (hl-sim only, X-Address)"
      in
      fun () ->
-       let signer : Follower.Signer.t =
-         match agent_key_env, unsigned with
-         | Some var, false -> Agent (key_of_env var)
-         | None, true -> Unsigned
+       let signer_for =
+         match agent_keys_dir, agent_key_env, unsigned with
+         | Some dir, None, false ->
+           (match Hl_copy_keystore.Sealed.Master_key.of_env ~var:master_key_env () with
+            | Error _ ->
+              Core.eprintf "%s is not set to a 64-digit hex master key\n" master_key_env;
+              Stdlib.exit 2
+            | Ok master ->
+              Key_source.keystore_signer (Hl_copy_keystore.Agent_keys.create ~dir master))
+         | None, Some var, false ->
+           let signer = Follower.Signer.Agent (key_of_env var) in
+           fun _ -> return (Ok signer)
+         | None, None, true -> fun _ -> return (Ok Follower.Signer.Unsigned)
          | _ ->
-           Core.eprintf "pass exactly one of -agent-key-env and -unsigned\n";
+           Core.eprintf
+             "pass exactly one of -agent-keys-dir, -agent-key-env and -unsigned\n";
            Stdlib.exit 2
        in
        let config =
@@ -114,7 +135,7 @@ let run_command =
            ~leader_poll_interval:(Time_ns.Span.of_int_sec leader_poll_s)
            ~api
            ~configs_dir
-           ~signer_for:(fun _ -> return (Ok signer))
+           ~signer_for
            ()
        in
        match%bind Engine.start ~port config with
