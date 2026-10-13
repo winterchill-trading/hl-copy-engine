@@ -218,10 +218,12 @@ let%expect_test "key store: no agent, then an agent, revoke pauses, rotation res
   let%bind engine = Engine.start config >>| ok_exn in
   let state () =
     let open Yojson.Safe.Util in
-    let f = Engine.status_json engine |> member "followers" |> index 0 in
-    ( f |> member "state" |> to_string
-    , f |> member "last_error" |> to_string_option
-    , f |> member "agent" |> to_string_option )
+    match Engine.status_json engine |> member "followers" |> to_list with
+    | [] -> "none", None, None
+    | f :: _ ->
+      ( f |> member "state" |> to_string
+      , f |> member "last_error" |> to_string_option
+      , f |> member "agent" |> to_string_option )
   in
   print_s [%sexp (state () : string * string option * string option)];
   [%expect
