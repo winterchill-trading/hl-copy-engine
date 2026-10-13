@@ -56,8 +56,8 @@ curl -s localhost:9930/metrics; curl -s localhost:9930/status
 | `-scan-ms` | 1000 | rescan the follow files |
 | `-max-ws-leaders` | 10 | leaders followed over the websocket; more are polled |
 | `-leader-poll-s` | 5 | poll interval of the leaders past that limit |
-| `-agent-keys-dir DIR` | | sign with each follower's active agent from hl-copy-api's sealed key files |
-| `-master-key-env VAR` | `HL_COPY_MASTER_KEY` | master key of `-agent-keys-dir` |
+| `-state-dir DIR` | | the API's state directory: sign with each follower's agent from `DIR/agents/<account>.key` |
+| `-master-key-env VAR` | `HL_COPY_MASTER_KEY` | master key of the key store |
 | `-agent-key-env VAR` | | sign with the agent key in `VAR` (development: one agent for every follow) |
 | `-unsigned` | | send unsigned orders (hl-sim without `-strict-signatures` only) |
 | `-log-level` | info | `debug`, `info` or `error`, on stderr |
@@ -66,14 +66,14 @@ curl -s localhost:9930/metrics; curl -s localhost:9930/status
 checks that every recorded output comes out the same (`-print` dumps the entries, `-state`
 prints the final state); it exits non-zero on the first difference.
 
-Agent keys: in production the engine reads hl-copy-api's key store
-(`hl-copy-keystore`, `<dir>/<owner>.sexp`, each key sealed under `HL_COPY_MASTER_KEY`) and
-opens the follower's `Active` agent in memory when the follower starts
-(`Key_source.keystore_signer`); a missing, pending or expired agent keeps the follow from
-starting, and the error shows in `/status`. The signer is a hook
+Agent keys: in production the engine shares the API's state directory (`-state-dir`,
+mounted read-only) and opens each follower's agent from `Hl_copy_core.Key_store`
+(`<state-dir>/agents/<account>.key`, sealed under `HL_COPY_MASTER_KEY`) in memory when the
+follower starts (`Key_source.keystore_signer`); a missing, revoked or expired agent keeps
+the follow from starting, and the error shows in `/status`. The signer is a hook
 (`Engine.Config.signer_for`, returning `Follower.Signer.Agent key`, `Hook sign` or
-`Unsigned`), so tests and local runs can pass a key from the environment instead. Keys are
-never logged or printed.
+`Unsigned`), so tests and local runs can pass one key from the environment
+(`-agent-key-env`) instead. Keys are never logged or printed.
 
 ## How a follow runs
 
@@ -194,7 +194,7 @@ script raises both.
   identically.
 - `test_sim_leaders.ml`: following one of hl-sim's simulated leaders with noise traders
   making the market, through ten leader decisions.
-- `test_key_source.ml`: the key store signer for active, pending, expired and
+- `test_key_source.ml`: the key store signer for missing, sealed, expired and
   wrong-master-key cases.
 - `test_engine.ml`: follow files start, pause, reconfigure and stop followers; `/metrics`
   and `/status`; mainnet refused.
@@ -211,7 +211,7 @@ Hl_copy_engine.Follower          (* Signer.t, Config.t, start, pause, resume, re
 Hl_copy_engine.Engine            (* Config.t with signer_for, start ?port, followers, find,
                                     metrics_text, status_json, stop *)
 Hl_copy_engine.Key_source.keystore_signer
-  : Hl_copy_keystore.Agent_keys.t -> Follower_config.t -> Follower.Signer.t Or_error.t Deferred.t
+  : Hl_copy_core.Key_store.t -> Follower_config.t -> Follower.Signer.t Or_error.t Deferred.t
 ```
 
 hl-copy-api writes `Hl_copy_core.Follower_config.t` files into the engine's
@@ -234,8 +234,7 @@ the agent keys through `Engine.Config.signer_for`.
 ```sh
 opam switch create 5.2.0+ox --repos ox=git+https://github.com/oxcaml/opam-repository.git,default
 # pin the siblings in this order (see .github/workflows/ci.yml): fixed-decimal,
-# exchange-core, parquet, market-data, hl-protocol, hl-copy-keystore (from the hl-copy-api
-# repository), venue-net, hl-client, hl-copy-core,
+# exchange-core, parquet, market-data, hl-protocol, venue-net, hl-client, hl-copy-core,
 # mm-core, binance-protocol, binance-client, order-book, exchange-core-engine,
 # price-anchor, hl-sim
 opam install . --deps-only --with-test
