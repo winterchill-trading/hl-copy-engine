@@ -17,17 +17,27 @@ module Config = struct
     ; signer : Signer.t
     ; resync_interval : Time_ns.Span.t
     ; journal_root : string option
+    ; builder : Builder_fee.t option
     }
 
-  let create ?(resync_interval = Time_ns.Span.of_int_sec 30) ?journal_root ~signer follow =
-    { follow; signer; resync_interval; journal_root }
+  let create
+    ?(resync_interval = Time_ns.Span.of_int_sec 30)
+    ?journal_root
+    ?builder
+    ~signer
+    follow
+    =
+    { follow; signer; resync_interval; journal_root; builder }
   ;;
 end
 
 (* How orders reach the exchange, whatever signs them. *)
 module Exec = struct
   type t =
-    { place : Order_request.t list -> Exchange_response.t Or_error.t Deferred.t
+    { place :
+        builder:Builder_fee.t option
+        -> Order_request.t list
+        -> Exchange_response.t Or_error.t Deferred.t
     ; cancel : Cancel_by_cloid.t list -> Exchange_response.t Or_error.t Deferred.t
     }
 
@@ -41,19 +51,58 @@ module Exec = struct
           ~account_address:account
           config
       in
-      { place = (fun orders -> Hl_client.Client.place_orders client orders)
+      { place =
+          (fun ~builder orders -> Hl_client.Client.place_orders ?builder client orders)
       ; cancel = (fun cancels -> Hl_client.Client.cancel_by_cloid client cancels)
       }
     | Hook sign ->
       let config = { config with address = Some account } in
-      { place = (fun orders -> Hl_client.Exchange.place_orders config ~sign orders)
+      { place =
+          (fun ~builder orders ->
+            Hl_client.Exchange.place_orders config ~sign ?builder orders)
       ; cancel = (fun cancels -> Hl_client.Exchange.cancel_by_cloid config ~sign cancels)
       }
     | Unsigned ->
       let config = { config with address = Some account } in
-      { place = (fun orders -> Hl_client.Exchange.place_orders config orders)
+      { place =
+          (fun ~builder orders -> Hl_client.Exchange.place_orders config ?builder orders)
       ; cancel = (fun cancels -> Hl_client.Exchange.cancel_by_cloid config cancels)
       }
+  ;;
+end
+
+(* What the follower's account has approved for the configured builder, from
+   [maxBuilderFee]. Orders carry the builder field only while [Approved]. *)
+module Builder_state = struct
+  type t =
+    | Unchecked
+    | Approved of { max_tenths_bp : int }
+    | Not_approved of { max_tenths_bp : int }
+    | Rejected of string (** the exchange refused an order over the builder fee *)
+    | Check_failed of string (** no answer yet; orders go out without the builder *)
+  [@@deriving equal]
+
+  let approved = function
+    | Approved _ -> true
+    | Unchecked | Not_approved _ | Rejected _ | Check_failed _ -> false
+  ;;
+
+  let max_tenths_bp = function
+    | Approved { max_tenths_bp } | Not_approved { max_tenths_bp } -> Some max_tenths_bp
+    | Unchecked | Rejected _ | Check_failed _ -> None
+  ;;
+
+  let note (builder : Builder_fee.t) = function
+    | Approved _ -> None
+    | Unchecked -> Some "builder fee approval not checked yet"
+    | Not_approved { max_tenths_bp } ->
+      Some
+        (sprintf
+           "builder fee not approved: %d tenths of a bp approved, %d needed"
+           max_tenths_bp
+           builder.fee_tenths_bp)
+    | Rejected message -> Some ("builder fee rejected: " ^ message)
+    | Check_failed message -> Some ("builder fee check failed: " ^ message)
   ;;
 end
 
@@ -76,6 +125,7 @@ type t =
   ; mutable last_resync : Time_ns.t option
   ; mutable drop_leader_updates : bool
   ; mutable last_error : string option
+  ; mutable builder_state : Builder_state.t
   ; stopped : unit Ivar.t
   }
 
@@ -117,6 +167,42 @@ let update_pnl_metrics t =
       then (
         t.metrics.realized_pnl <- Usd.to_float s.realized;
         t.metrics.unrealized_pnl <- Usd.to_float s.unrealized))
+;;
+
+(* Reads the follower's approved cap for the configured builder. A failed check keeps the
+   last answer, so a flaky info request does not drop the fee from approved accounts. *)
+let check_builder t =
+  match t.config.builder with
+  | None -> return ()
+  | Some (builder : Builder_fee.t) ->
+    let%bind () =
+      Rate_limit.take
+        ~time_source:(Time_source.read_only t.time_source)
+        t.rate_limit
+        ~weight:Rate_limit.Weight.max_builder_fee
+    in
+    let follower = t.core.follow.follower in
+    let%map result =
+      Hl_client.Info.max_builder_fee t.api ~user:follower ~builder:builder.builder
+    in
+    let before = t.builder_state in
+    t.builder_state
+    <- (match result, before with
+        | Ok max_tenths_bp, _ when max_tenths_bp >= builder.fee_tenths_bp ->
+          Approved { max_tenths_bp }
+        | Ok max_tenths_bp, _ -> Not_approved { max_tenths_bp }
+        | Error _, (Approved _ | Not_approved _) -> before
+        | Error err, (Unchecked | Rejected _ | Check_failed _) ->
+          Check_failed (Error.to_string_hum err));
+    if not (Builder_state.equal before t.builder_state)
+    then
+      Log.Global.info_s
+        [%message
+          "builder fee approval"
+            ~follower:(follower : Address.t)
+            ~builder:(builder.builder : Address.t)
+            ~approved:(Builder_state.approved t.builder_state : bool)
+            ~note:(Builder_state.note builder t.builder_state : string option)]
 ;;
 
 (* Applies one input: journal it, step the core, journal the output, then send the plan.
@@ -190,11 +276,22 @@ and send t ?lag_from places =
       t.rate_limit
       ~weight:(Rate_limit.Weight.exchange ~batch:(List.length requests))
   in
+  let builder =
+    match t.config.builder with
+    | Some _ as builder when Builder_state.approved t.builder_state -> builder
+    | Some _ ->
+      t.metrics.builder_fee_skipped
+      <- t.metrics.builder_fee_skipped + List.length requests;
+      None
+    | None -> None
+  in
+  if Option.is_some builder
+  then t.metrics.builder_fee_orders <- t.metrics.builder_fee_orders + List.length requests;
   let sent = now t in
   t.metrics.orders <- t.metrics.orders + List.length requests;
   Option.iter lag_from ~f:(fun from ->
     Metrics.Summary.add t.metrics.lag_ms (Time_ns.Span.to_ms (Time_ns.diff sent from)));
-  let%bind response = t.exec.place requests in
+  let%bind response = t.exec.place ~builder requests in
   let orders = List.map places ~f:fst in
   let reject_all message =
     Deferred.List.iter ~how:`Sequential orders ~f:(fun o ->
@@ -206,7 +303,13 @@ and send t ?lag_from places =
        positions come from the venue, not from what we think happened. *)
     let%bind () = reject_all ("request failed: " ^ Error.to_string_hum err) in
     resync t
-  | Ok (Err message) -> reject_all message
+  | Ok (Err message) ->
+    (* The approval was revoked or lowered since the last check: stop sending the field
+       until the next resync checks again. *)
+    if Option.is_some builder
+       && String.is_substring (String.lowercase message) ~substring:"builder"
+    then t.builder_state <- Rejected message;
+    reject_all message
   | Ok (Ok (Cancel _ | Default)) -> reject_all "unexpected response"
   | Ok (Ok (Order statuses)) ->
     let pairs =
@@ -259,6 +362,7 @@ and resync t =
       t.rate_limit
       ~weight
   in
+  let%bind () = check_builder t in
   let%bind () = take Rate_limit.Weight.clearinghouse_state in
   let%bind leader_state = Hl_client.Info.clearinghouse_state ~user:leader t.api in
   let%bind () = take Rate_limit.Weight.clearinghouse_state in
@@ -447,6 +551,7 @@ let start
     ; last_resync = None
     ; drop_leader_updates = false
     ; last_error = None
+    ; builder_state = Unchecked
     ; stopped = Ivar.create ()
     }
   in
@@ -558,6 +663,21 @@ let positions_json t =
          ]))
 ;;
 
+let builder_json t =
+  match t.config.builder with
+  | None -> `Null
+  | Some builder ->
+    let opt f = Option.value_map ~default:`Null ~f in
+    `Assoc
+      [ "address", `String (Address.to_string builder.builder)
+      ; "fee_tenths_bp", `Int builder.fee_tenths_bp
+      ; "approved", `Bool (Builder_state.approved t.builder_state)
+      ; ( "max_approved_tenths_bp"
+        , opt (fun x -> `Int x) (Builder_state.max_tenths_bp t.builder_state) )
+      ; "note", opt (fun x -> `String x) (Builder_state.note builder t.builder_state)
+      ]
+;;
+
 let status_json t =
   let core = t.core in
   let m = core.mirror in
@@ -596,6 +716,7 @@ let status_json t =
       , Option.value_map t.last_resync ~default:`Null ~f:(fun time ->
           `String (Time_ns.to_string_iso8601_basic time ~zone:Time_float.Zone.utc)) )
     ; "metrics", Metrics.to_json t.metrics
+    ; "builder", builder_json t
     ]
 ;;
 

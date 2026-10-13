@@ -36,12 +36,15 @@ module Config : sig
     ; signer : Signer.t
     ; resync_interval : Time_ns.Span.t
     ; journal_root : string option (** no journal when [None] *)
+    ; builder : Hl_protocol.Builder_fee.t option
+    (** sent on every order while the follower has approved at least this fee *)
     }
 
-  (** 30 s resyncs, no journal. *)
+  (** 30 s resyncs, no journal, no builder. *)
   val create
     :  ?resync_interval:Time_ns.Span.t
     -> ?journal_root:string
+    -> ?builder:Hl_protocol.Builder_fee.t
     -> signer:Signer.t
     -> Follower_config.t
     -> t
@@ -92,7 +95,10 @@ val last_error : t -> string option
 (** For [/status]: [follower], [leader], [state] (running, paused, stopped), [pnl]
     (attributed realized plus unrealized, USD), [positions] (a list of [coin], [size],
     [entry_px], [unrealized_pnl], [leverage], all numbers), [last_error], and details
-    (equities, both positions maps, margin cap, last resync, metrics). *)
+    (equities, both positions maps, margin cap, last resync, metrics). [builder] is
+    [null] without a builder, else [address], [fee_tenths_bp], [approved],
+    [max_approved_tenths_bp] (from the last [maxBuilderFee] check) and [note], which says
+    why orders go out without the builder field ([null] when approved). *)
 val status_json : t -> Yojson.Safe.t
 
 module For_testing : sig
