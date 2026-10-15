@@ -36,7 +36,8 @@ cat > follows/0xFOLLOWER-0x1eade50000000000000000000000000000000000.sexp <<'EOF'
  (mode (Multiplier 0.1))
  (caps ((max_leverage (5)) (max_notional_per_symbol ()) (max_daily_loss ())
         (allowlist ()) (min_order_notional 10)))
- (slippage_bps 20) (paused false))
+ (slippage_bps 20) (paused false)
+ (algo (Twap (duration_ms 60000) (slices 6) (max_participation ()))))
 EOF
 
 HL_AGENT_KEY=0x... dune exec hl-copy-engine -- run \
@@ -145,6 +146,50 @@ graph LR
   alone rebuild the state; a restart replays the journal (client order ids continue where
   they stopped) and then resyncs before sending anything.
 
+## Execution algorithms
+
+Each follow names how the orders its mirror plans are executed, in the follow file's
+`algo` field (`Hl_copy_core.Exec_algo`, left out for the default `Immediate`, so older
+files and the API's files read unchanged). The algorithms are
+[execution-algos](https://github.com/winterchill-trading/execution-algos)'s:
+
+| `algo` | Execution of a planned order |
+| --- | --- |
+| `Immediate` (default) | one IOC at the mirror's limit, as before algorithms existed |
+| `(Twap (duration_ms D) (slices N) (max_participation ()))` | `N` IOC slices over `D` |
+| `(Vwap ...)` | like TWAP, slices sized by a volume profile (uniform in the engine: no history) |
+| `(Pov (participation R) (max_duration_ms D))` | IOC children at `R` of the market volume since the parent started |
+| `(Passive (display F) (timeout_ms T))` | one add-liquidity-only child pegged to the best price on its side (`F < 1` shows only part: an iceberg), then an IOC for the rest at `T` |
+| `(Adaptive (small_ratio 0.5) (depth_bps 10) (max_behind_bps 50) (max_drift_bps 10) (timeout_ms 20000))` | passive when the order is small against the depth near the mid and the follower is not far behind; taking when it is large, when the mid moves away, or at the timeout |
+
+How it runs:
+
+- Every planned place is a *parent* in `Follower_core` (`Exec`), worked by an
+  `Execution_algos.Scheduler`. The mirror counts the parent as in flight until its
+  scheduler is done, including across resyncs (open parents are added to the resync's
+  open orders), so a parent is never planned twice. Child `k` has the parent's client
+  order id with `k` in bits 40 and up of its sequence half; child 0 is the parent's own
+  id, so an `Immediate` follow sends exactly what it sent before.
+- Parents below the minimum order notional (a full close of a small position) always go
+  out as one IOC.
+- Algorithms other than `Immediate` need the market: the follower opens the venue's public
+  websocket feed (`Hl_client.Live_feed`, L2 and trades) for the coin on first use and
+  applies a `Market` input (time, top 20 levels, cumulative traded size) to its parents
+  every 500 ms (`Follower.Config.algo_tick`). Ticks are journaled like every input.
+- Post-only children are sent with `Order_type.alo`; their fills arrive on the follower's
+  own `userFills` subscription (`Hl_client.User_feed`), opened the first time a child
+  rests. IOC fills still come from the order answer.
+- Each finished parent produces an `Execution_algos.Cost_report` (arrival slippage
+  against the mid at the first tick, implementation shortfall including the move missed
+  by what did not fill, fees, children, outcome). IOC fees are not in the answer and are
+  estimated at 4.5 bp (1.5 bp for resting fills) in the report. Reports are journaled in
+  the outputs, counted in the metrics and listed in `/status` under `execution`
+  (`active` parents, the 20 most `recent` reports and `totals`).
+- The journal moved to entries version 2 (`<date>.v2.journal`, inputs with the follow's
+  algo and the `Market` ticks, outputs with post-only ids and reports). Version 1 files
+  (`<date>.journal`) still load and replay; their outputs are compared on plan and
+  notices only.
+
 ## Metrics
 
 `/metrics` (Prometheus text, labels `follower` and `leader`): `hl_copy_leader_updates_total`,
@@ -156,7 +201,10 @@ no_liquidity, agent, rate_limited, other), `hl_copy_resyncs_total`,
 `hl_copy_unrealized_pnl_usd` (`Hl_copy_core.Pnl` attribution, before fees),
 `hl_copy_equity_change_usd`, `hl_copy_paused`, `hl_copy_builder_fee_orders_total` (orders
 sent with the builder field), `hl_copy_builder_fee_skipped_total` (orders sent without it
-because the follower has not approved the fee); and per engine `hl_copy_followers`,
+because the follower has not approved the fee), `hl_copy_parents_total{algo,outcome}`
+(finished parents), `hl_copy_arrival_slippage_bps` (summary, per filled parent),
+`hl_copy_shortfall_usd` and `hl_copy_exec_fees_usd` (summed cost reports); and per engine
+`hl_copy_followers`,
 `hl_copy_config_errors`, `hl_copy_rest_weight_total`.
 
 `/status` (JSON): `{"followers": [...], "leaders": [...], "errors": [...]}`. Each
@@ -202,6 +250,21 @@ following resyncs. With the default 10 noise traders and the 20 bps default boun
 follower IOCs found nothing (7 `no_liquidity` rejects in 17 orders), which is why the
 script raises both.
 
+`ALGO` sets the follow's algorithm. Three 60 s runs on 2026-10-16 (seed 7, otherwise as
+above; the leader's path differs between runs because the follower trades on the same
+simulated book), from the script's `execution` summary of the finished parents:
+
+| `ALGO` | Parents | Fill rate | Slippage (bps, filled) | Shortfall (bps of target) | Children | Journal replay |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `Immediate` | 9 | 27.6% | 13.6 | 5.0 | 9 | identical |
+| `(Twap (duration_ms 6000) (slices 3) ...)` | 9 | 99.99% | 1.3 | 5.8 | 28 | identical |
+| default `Adaptive` | 9 | 99.93% | 6.6 | 11.0 | 21 | identical |
+
+On the thin simulated book a single IOC finds a fraction of the size within the bound
+and leaves the rest to the next resync (the unfilled part counts in the shortfall at the
+price move it missed); slicing waits for the noise traders to refill the book. The
+shortfall includes the estimated taker fee (4.5 bp).
+
 ## Tests
 
 `dune test` runs, with no network beyond loopback:
@@ -225,6 +288,12 @@ script raises both.
   until the follower approves the fee, then carry it and the builder account is credited
   1 bp of the notional; after a revoke the refused order marks the approval gone and the
   retry goes out without it.
+- `test_algo_sim.ml`: hl-sim with strict signatures, the follow worked by TWAP (three
+  slices; the journal replays identically), passive (rests at the bid, sweeps at the
+  timeout) and adaptive (rests, filled as the maker by a seller, the fill read from the
+  follower's own `userFills`).
+- `test_algo_bridge.ml`: the follow's algorithm type and execution-algos' have the same
+  bin_prot shape and sexp.
 - `test_engine.ml`: follow files start, pause, reconfigure and stop followers; `/metrics`
   and `/status`; mainnet refused.
 
@@ -232,8 +301,10 @@ script raises both.
 
 ```ocaml
 Hl_copy_engine.Safety.check_url : Uri.t -> unit Or_error.t
-Hl_copy_engine.Follower_core     (* Input.t (Stable.V1), Output.t, apply, replay *)
-Hl_copy_engine.Journal           (* Entry.Stable.V1, Writer, load, verify, dir *)
+Hl_copy_engine.Follower_core     (* Input.t (Stable.V2, V1 read), Output.t (post_only,
+                                    reports), Exec, apply, replay, market_symbols *)
+Hl_copy_engine.Journal           (* Entry.Stable.V2 (V1 read), Writer, load, verify, dir *)
+Hl_copy_engine.Algo_bridge       (* Exec_algo.t <-> Execution_algos.Algo.t *)
 Hl_copy_engine.Leader_hub        (* create, subscribe ~leader, source, leaders *)
 Hl_copy_engine.Follower          (* Signer.t, Config.t, start, pause, resume, reconfigure,
                                     resync_now, stop, state, metrics, status_json *)
@@ -260,7 +331,7 @@ the agent keys through `Engine.Config.signer_for`.
 opam switch create 5.2.0+ox --repos ox=git+https://github.com/oxcaml/opam-repository.git,default
 # pin the siblings in this order (see .github/workflows/ci.yml): fixed-decimal,
 # exchange-core, parquet, market-data, hl-protocol, venue-net, hl-client, hl-copy-core,
-# mm-core, binance-protocol, binance-client, order-book, exchange-core-engine,
+# execution-algos, mm-core, binance-protocol, binance-client, order-book, exchange-core-engine,
 # price-anchor, hl-sim
 opam install . --deps-only --with-test
 dune build && dune test
