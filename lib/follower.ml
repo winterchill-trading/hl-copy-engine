@@ -18,16 +18,18 @@ module Config = struct
     ; resync_interval : Time_ns.Span.t
     ; journal_root : string option
     ; builder : Builder_fee.t option
+    ; algo_tick : Time_ns.Span.t
     }
 
   let create
     ?(resync_interval = Time_ns.Span.of_int_sec 30)
     ?journal_root
     ?builder
+    ?(algo_tick = Time_ns.Span.of_int_ms 500)
     ~signer
     follow
     =
-    { follow; signer; resync_interval; journal_root; builder }
+    { follow; signer; resync_interval; journal_root; builder; algo_tick }
   ;;
 end
 
@@ -106,6 +108,29 @@ module Builder_state = struct
   ;;
 end
 
+(* Books and traded volume of the symbols that parents worked by an algorithm other than
+   [Immediate] need, from the venue's public websocket (one feed per symbol, opened on
+   first use). *)
+module Market = struct
+  type t =
+    { books : Market_data.L2_book.t Hashtbl.M(Symbol).t
+    ; traded : Size.t Hashtbl.M(Symbol).t
+    ; feeds : Market_data.Feed.t Hashtbl.M(Symbol).t
+    ; opening : unit Hashtbl.M(Symbol).t
+    }
+
+  let create () =
+    { books = Hashtbl.create (module Symbol)
+    ; traded = Hashtbl.create (module Symbol)
+    ; feeds = Hashtbl.create (module Symbol)
+    ; opening = Hashtbl.create (module Symbol)
+    }
+  ;;
+end
+
+(* How many finished parents [/status] lists. *)
+let recent_reports = 20
+
 type t =
   { config : Config.t
   ; api : Hl_client.Config.t
@@ -127,6 +152,10 @@ type t =
   ; mutable last_error : string option
   ; mutable builder_state : Builder_state.t
   ; mutable builder_checked_at : Time_ns.t option
+  ; market : Market.t
+  ; mutable own_fills : [ `Off | `Opening | `On of Hl_client.User_feed.t ]
+  ; reports : (Time_ns.t * Execution_algos.Cost_report.t) Queue.t
+  ; mutable totals : Execution_algos.Cost_report.Totals.t
   ; stopped : unit Ivar.t
   }
 
@@ -220,6 +249,31 @@ let check_builder t =
             ~note:(Builder_state.note builder t.builder_state : string option)]
 ;;
 
+let enqueue t f =
+  if Ivar.is_full t.stopped then return () else Throttle.enqueue t.sequencer f
+;;
+
+let record_report t ~time (r : Execution_algos.Cost_report.t) =
+  Queue.enqueue t.reports (time, r);
+  while Queue.length t.reports > recent_reports do
+    ignore (Queue.dequeue_exn t.reports : Time_ns.t * Execution_algos.Cost_report.t)
+  done;
+  t.totals <- Execution_algos.Cost_report.Totals.add t.totals r;
+  Metrics.parent t.metrics r
+;;
+
+let fill_of_user_fill (f : User_fill.t) =
+  { Fill.time_ns = f.time * 1_000_000
+  ; symbol = f.coin
+  ; side = f.side
+  ; size = f.sz
+  ; price = f.px
+  ; fee = f.fee
+  ; closed_pnl = f.closed_pnl
+  ; cloid = f.cloid
+  }
+;;
+
 (* Applies one input: journal it, step the core, journal the output, then send the plan.
    Order results are applied the same way, inside the same sequencer job. *)
 let rec apply t ?lag_from input =
@@ -233,10 +287,14 @@ let rec apply t ?lag_from input =
   t.core <- core;
   Option.iter t.journal ~f:(fun j -> Journal.Writer.output j ~time output);
   List.iter output.notices ~f:(log_notice t);
+  List.iter output.reports ~f:(record_report t ~time);
   t.metrics.paused <- not (Follower_core.is_running core);
-  execute t ?lag_from output.plan
+  watch_market t;
+  if not (List.is_empty output.post_only) then watch_own_fills t;
+  execute t ?lag_from output
 
-and execute t ?lag_from (plan : Plan.t) =
+and execute t ?lag_from (output : Follower_core.Output.t) =
+  let plan = output.plan in
   let cancels =
     List.filter_map plan.actions ~f:(function
       | Plan.Action.Cancel { symbol; cloid } ->
@@ -270,9 +328,11 @@ and execute t ?lag_from (plan : Plan.t) =
     Deferred.List.iter ~how:`Sequential unknown ~f:(fun o ->
       apply t (Order_rejected { cloid = o.cloid; message = "unknown asset" }))
   in
-  if List.is_empty places then return () else send t ?lag_from places
+  if List.is_empty places
+  then return ()
+  else send t ?lag_from ~post_only:output.post_only places
 
-and send t ?lag_from places =
+and send t ?lag_from ~post_only places =
   let marks = t.core.mirror.marks in
   let requests =
     List.map places ~f:(fun ((o : Plan.Order.t), asset) ->
@@ -281,7 +341,10 @@ and send t ?lag_from places =
       ; limit_px = o.limit_px
       ; sz = o.size
       ; reduce_only = o.reduce_only
-      ; order_type = Order_type.ioc
+      ; order_type =
+          (if List.mem post_only o.cloid ~equal:Cloid.equal
+           then Order_type.alo
+           else Order_type.ioc)
       ; cloid = Some o.cloid
       })
   in
@@ -363,10 +426,102 @@ and send t ?lag_from places =
         update_pnl_metrics t
       | Error message -> apply t (Order_rejected { cloid = o.cloid; message })
       | Resting _ ->
-        (* An IOC never rests; leave it pending until the next resync replaces the pending
-           list from the venue. *)
+        (* A post-only child rests: its fills come from the account's fill feed. An IOC
+           never rests; leave it pending until the next resync replaces the pending list
+           from the venue. *)
         return ()
       | Waiting_for_fill | Waiting_for_trigger -> apply t (Mirror (Order_closed o.cloid)))
+
+(* Opens a public market feed for every symbol a parent waits on (see [Market]). *)
+and watch_market t =
+  List.iter (Follower_core.market_symbols t.core) ~f:(fun symbol ->
+    if not
+         (Hashtbl.mem t.market.feeds symbol
+          || Hashtbl.mem t.market.opening symbol
+          || Ivar.is_full t.stopped)
+    then (
+      Hashtbl.set t.market.opening ~key:symbol ~data:();
+      don't_wait_for
+        (match%map
+           Monitor.try_with (fun () ->
+             Hl_client.Live_feed.create
+               t.api
+               ~symbols:[ Symbol.to_string symbol ]
+               ~streams:[ L2; Trades ])
+         with
+         | Error exn ->
+           Hashtbl.remove t.market.opening symbol;
+           Log.Global.info_s
+             [%message
+               "market feed failed"
+                 ~follower:(t.core.follow.follower : Address.t)
+                 (symbol : Symbol.t)
+                 (exn : Exn.t)]
+         | Ok feed ->
+           Hashtbl.remove t.market.opening symbol;
+           Hashtbl.set t.market.feeds ~key:symbol ~data:feed;
+           let module F = (val feed) in
+           Pipe.close_read F.bbo;
+           Pipe.close_read F.funding;
+           don't_wait_for
+             (Pipe.iter_without_pushback F.l2 ~f:(fun u ->
+                Hashtbl.update t.market.books symbol ~f:(fun b ->
+                  Market_data.L2_book.apply
+                    (Option.value b ~default:Market_data.L2_book.empty)
+                    u)));
+           don't_wait_for
+             (Pipe.iter_without_pushback F.trades ~f:(fun (tr : Market_data.Trade.t) ->
+                Hashtbl.update t.market.traded symbol ~f:(fun x ->
+                  Size.(Option.value x ~default:zero + tr.size)))))))
+
+(* Fills of resting (post-only) children come from the account's own [userFills]; IOC
+   fills come with the order answer and are ignored here. The first snapshot is history
+   (already applied, or replayed from the journal); snapshots after a reconnect carry the
+   fills missed meanwhile. *)
+and watch_own_fills t =
+  match t.own_fills with
+  | `On _ | `Opening -> ()
+  | `Off ->
+    t.own_fills <- `Opening;
+    let follower = t.core.follow.follower in
+    let failed err =
+      t.own_fills <- `Off;
+      Log.Global.info_s
+        [%message "own fill feed failed" ~follower:(follower : Address.t) (err : Error.t)]
+    in
+    don't_wait_for
+      (match%bind Hl_client.User_feed.create t.api with
+       | Error err -> return (failed err)
+       | Ok feed ->
+         (match%map Hl_client.User_feed.subscribe feed ~address:follower with
+          | Error err ->
+            failed err;
+            don't_wait_for (Hl_client.User_feed.close feed)
+          | Ok updates ->
+            t.own_fills <- `On feed;
+            let reconnected = ref false in
+            don't_wait_for
+              (Pipe.iter_without_pushback updates ~f:(function
+                | Resync _ -> reconnected := true
+                | Position _ -> ()
+                | Fills { is_snapshot; fills; _ } ->
+                  if (not is_snapshot) || !reconnected
+                  then
+                    List.iter fills ~f:(fun (f : User_fill.t) ->
+                      match f.cloid with
+                      | None -> ()
+                      | Some cloid ->
+                        don't_wait_for
+                          (enqueue t (fun () ->
+                             if Follower_core.is_resting_child t.core cloid
+                             then (
+                               let fill = fill_of_user_fill f in
+                               t.metrics.fills <- t.metrics.fills + 1;
+                               t.pnl
+                               <- Pnl.on_fill t.pnl ~leader:t.core.follow.leader fill;
+                               let%map () = apply t (Mirror (Follower_fill fill)) in
+                               update_pnl_metrics t)
+                             else return ())))))))
 
 and resync t =
   let leader = t.core.follow.leader in
@@ -439,10 +594,6 @@ and resync t =
     update_pnl_metrics t
 ;;
 
-let enqueue t f =
-  if Ivar.is_full t.stopped then return () else Throttle.enqueue t.sequencer f
-;;
-
 let check_day t =
   let today = utc_date (now t) in
   if Date.( > ) today t.day
@@ -494,6 +645,41 @@ let rec resync_loop t =
         resync t)
     in
     resync_loop t)
+;;
+
+(* Market ticks for the parents waiting on them, every [algo_tick]. The book is the latest
+   from the feed (none until its first snapshot); the volume is the feed's cumulative
+   traded size, which the scheduler only differences. *)
+let rec algo_loop t =
+  let%bind () =
+    Deferred.any_unit
+      [ Time_source.after t.time_source t.config.algo_tick; Ivar.read t.stopped ]
+  in
+  if Ivar.is_full t.stopped
+  then return ()
+  else (
+    let%bind () =
+      match Follower_core.market_symbols t.core with
+      | [] -> return ()
+      | symbols ->
+        enqueue t (fun () ->
+          Deferred.List.iter ~how:`Sequential symbols ~f:(fun symbol ->
+            match Hashtbl.find t.market.books symbol with
+            | Some book when Market_data.L2_book.has_snapshot book ->
+              apply
+                t
+                (Market
+                   { symbol
+                   ; now_ns = Time_ns.to_int_ns_since_epoch (now t)
+                   ; book = Execution_algos.Book.of_l2_book book
+                   ; traded =
+                       Option.value
+                         (Hashtbl.find t.market.traded symbol)
+                         ~default:Size.zero
+                   })
+            | Some _ | None -> return ()))
+    in
+    algo_loop t)
 ;;
 
 let specs_of_meta (meta : Meta.t) =
@@ -568,6 +754,10 @@ let start
     ; last_error = None
     ; builder_state = Unchecked
     ; builder_checked_at = None
+    ; market = Market.create ()
+    ; own_fills = `Off
+    ; reports = Queue.create ()
+    ; totals = Execution_algos.Cost_report.Totals.empty
     ; stopped = Ivar.create ()
     }
   in
@@ -596,6 +786,7 @@ let start
        don't_wait_for (on_leader_update t update);
        Deferred.unit));
   don't_wait_for (resync_loop t);
+  don't_wait_for (algo_loop t);
   t
 ;;
 
@@ -626,6 +817,16 @@ let stop t =
     let%bind () = enqueue t (fun () -> apply t Stop) in
     Ivar.fill_if_empty t.stopped ();
     Option.iter t.leader_updates ~f:Pipe.close_read;
+    let%bind () =
+      Deferred.List.iter ~how:`Parallel (Hashtbl.data t.market.feeds) ~f:(fun feed ->
+        let module F = (val feed : Market_data.Feed.S) in
+        F.close ())
+    in
+    let%bind () =
+      match t.own_fills with
+      | `On feed -> Hl_client.User_feed.close feed
+      | `Off | `Opening -> return ()
+    in
     match t.journal with
     | None -> return ()
     | Some j -> Journal.Writer.close j)
@@ -694,6 +895,62 @@ let builder_json t =
       ]
 ;;
 
+let report_json ((time, r) : Time_ns.t * Execution_algos.Cost_report.t) =
+  `Assoc
+    [ "time", `String (Time_ns.to_string_iso8601_basic time ~zone:Time_float.Zone.utc)
+    ; "algo", `String r.algo
+    ; "outcome", `String (Execution_algos.Cost_report.Outcome.to_string r.outcome)
+    ; "side", `String (if Side.is_buy r.side then "buy" else "sell")
+    ; "target", `Float (Size.to_float r.target)
+    ; "filled", `Float (Size.to_float r.filled)
+    ; "avg_px", `Float (Price.to_float r.avg_px)
+    ; "arrival_px", `Float (Price.to_float r.arrival_px)
+    ; "children", `Int r.children
+    ; "maker_filled", `Float (Size.to_float r.maker_filled)
+    ; "fees", `Float r.fees
+    ; "arrival_slippage_bps", `Float r.arrival_slippage_bps
+    ; "shortfall", `Float r.shortfall
+    ; "shortfall_bps", `Float r.shortfall_bps
+    ]
+;;
+
+(* The follow's algorithm, the parents being worked, the last finished ones and totals. *)
+let execution_json t =
+  let totals = t.totals in
+  `Assoc
+    [ "algo", `String (Exec_algo.name t.core.follow.algo)
+    ; ( "active"
+      , `List
+          (List.map t.core.execs ~f:(fun (e : Follower_core.Exec.t) ->
+             let open Execution_algos in
+             `Assoc
+               [ "cloid", `String (Cloid.to_string e.order.cloid)
+               ; "coin", `String (Symbol.to_string e.order.symbol)
+               ; "algo", `String (Algo.name (Scheduler.algo e.sched))
+               ; "side", `String (if Side.is_buy e.order.side then "buy" else "sell")
+               ; "size", `Float (Size.to_float e.order.size)
+               ; "filled", `Float (Size.to_float (Scheduler.filled e.sched))
+               ; "working", `Float (Size.to_float (Scheduler.working_size e.sched))
+               ; "children", `Int (Scheduler.children e.sched)
+               ])) )
+    ; "recent", `List (Queue.to_list t.reports |> List.rev |> List.map ~f:report_json)
+    ; ( "totals"
+      , `Assoc
+          [ "parents", `Int totals.parents
+          ; "filled_parents", `Int totals.filled_parents
+          ; "target_notional", `Float totals.target_notional
+          ; "filled_notional", `Float totals.filled_notional
+          ; "fees", `Float totals.fees
+          ; "shortfall", `Float totals.shortfall
+          ; ( "shortfall_bps"
+            , `Float (Execution_algos.Cost_report.Totals.shortfall_bps totals) )
+          ; ( "slippage_bps"
+            , `Float (Execution_algos.Cost_report.Totals.slippage_bps totals) )
+          ; "fill_rate", `Float (Execution_algos.Cost_report.Totals.fill_rate totals)
+          ] )
+    ]
+;;
+
 let status_json t =
   let core = t.core in
   let m = core.mirror in
@@ -733,6 +990,7 @@ let status_json t =
           `String (Time_ns.to_string_iso8601_basic time ~zone:Time_float.Zone.utc)) )
     ; "metrics", Metrics.to_json t.metrics
     ; "builder", builder_json t
+    ; "execution", execution_json t
     ]
 ;;
 

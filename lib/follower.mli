@@ -13,9 +13,17 @@
     [resync_interval] (default 30 s), after every leader reconnect, and after an order
     request that failed in transport (the order may or may not have gone through).
 
-    Orders fill or die at once, so the order response is the fill: [Filled] becomes a
+    IOC orders fill or die at once, so the order response is the fill: [Filled] becomes a
     follower fill (fees are not in the response; the next resync's equity includes them)
-    and closes the order, [Error] becomes a reject. *)
+    and closes the order, [Error] becomes a reject.
+
+    Execution algorithms ({!Follower_config.t.algo}): each order the mirror plans is a
+    parent in {!Follower_core}. [Immediate] sends it as one IOC, as above. Other
+    algorithms need the market: the actor opens the venue's public websocket feed (L2 and
+    trades) for the parent's coin and applies a [Market] input every [algo_tick]; child
+    orders are IOC or, for passive work, add-liquidity-only, whose fills come from the
+    account's own [userFills] subscription. Finished parents' cost reports go to the
+    journal (in the outputs), the metrics and [status_json]'s [execution] object. *)
 
 open! Core
 open! Async
@@ -40,13 +48,16 @@ module Config : sig
     (** sent on every order while the follower has approved at least this fee
         ([maxBuilderFee], checked at start and on resyncs: every resync until approved,
         then every 5 minutes or after an order is refused over the builder fee) *)
+    ; algo_tick : Time_ns.Span.t
+    (** how often parents worked by an algorithm other than [Immediate] get a market tick *)
     }
 
-  (** 30 s resyncs, no journal, no builder. *)
+  (** 30 s resyncs, no journal, no builder, 500 ms algorithm ticks. *)
   val create
     :  ?resync_interval:Time_ns.Span.t
     -> ?journal_root:string
     -> ?builder:Hl_protocol.Builder_fee.t
+    -> ?algo_tick:Time_ns.Span.t
     -> signer:Signer.t
     -> Follower_config.t
     -> t
