@@ -17,7 +17,9 @@
 # 0's address), SLIPPAGE_BPS (50), NOISE_TRADERS (40: the simulated book is thin and the
 # leader's own IOC orders take what is near the touch, so the follower needs a deeper book
 # and a wider bound than the 20 bps default to keep up), MODE ("(Multiplier 0.1)": the simulated leaders hold $100,000 and
-# every other account $1,000,000, so this copies the leader's sizes one for one).
+# every other account $1,000,000, so this copies the leader's sizes one for one), ALGO
+# (empty: Immediate; otherwise the follow's execution algorithm as a sexp, e.g.
+# "(Twap (duration_ms 6000) (slices 3) (max_participation ()))").
 #
 # The two keys below are throwaway keys for the simulator only. Never put a real key in
 # this script; the engine refuses mainnet URLs regardless.
@@ -41,6 +43,7 @@ engine_port="${ENGINE_PORT:-9960}"
 leader="${LEADER:-0x1eade50000000000000000000000000000000000}"
 mode="${MODE:-(Multiplier 0.1)}"
 slippage_bps="${SLIPPAGE_BPS:-50}"
+algo="${ALGO:-}"
 noise_traders="${NOISE_TRADERS:-40}"
 log_dir="${LOG_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/hl-copy-e2e.XXXXXX")}"
 mkdir -p "$log_dir/follows" "$log_dir/journal"
@@ -100,7 +103,7 @@ cat >"$log_dir/follows/$follower-$leader.sexp" <<SEXP
 ((follower $follower) (leader $leader) (mode $mode)
  (caps ((max_leverage (5)) (max_notional_per_symbol ()) (max_daily_loss ())
         (allowlist ()) (min_order_notional 10)))
- (slippage_bps $slippage_bps) (paused false))
+ (slippage_bps $slippage_bps) (paused false)${algo:+ (algo $algo)})
 SEXP
 
 echo "e2e: engine on $engine_port for ${run_for}s, log $log_dir/engine.log" >&2
@@ -130,6 +133,15 @@ echo "e2e: metrics" >&2
 curl -s "http://127.0.0.1:$engine_port/metrics" | grep -v '^#' |
   sed -E 's/\{follower="[^"]*",leader="[^"]*",?/{/; s/\{\}//'
 curl -s "http://127.0.0.1:$engine_port/status" >"$log_dir/status.json"
+echo "e2e: execution (cost reports of finished parents)" >&2
+python3 -c 'import json,sys
+for f in json.load(open(sys.argv[1]))["followers"]:
+    e = f["execution"]
+    print("algo", e["algo"], "active", len(e["active"]), json.dumps(e["totals"]))
+    for r in e["recent"][:5]:
+        print("  ", r["algo"], r["outcome"], r["side"], r["target"], "filled", r["filled"],
+              "children", r["children"], "slippage_bps %.2f" % r["arrival_slippage_bps"],
+              "shortfall %.2f" % r["shortfall"])' "$log_dir/status.json"
 
 kill "$engine_pid"
 wait "$engine_pid" 2>/dev/null || true
