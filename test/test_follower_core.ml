@@ -308,3 +308,152 @@ let%expect_test "replay: the same inputs give the same outputs, through bin_io" 
   print_s [%sexp (Follower_core.replay (List.tl_exn inputs) |> Result.is_error : bool)];
   [%expect {| true |}]
 ;;
+
+(* {2 Execution algorithms} *)
+
+let follow_with algo = { (follow ()) with algo }
+
+let book ~bid ~ask =
+  Execution_algos.Book.create
+    ~bids:[ Price.of_string bid, Size.of_string "1" ]
+    ~asks:[ Price.of_string ask, Size.of_string "1" ]
+;;
+
+let market ?(symbol = btc) ~s ~bid ~ask ~traded () =
+  Follower_core.Input.Market
+    { symbol
+    ; now_ns = s * 1_000_000_000
+    ; book = book ~bid ~ask
+    ; traded = Size.of_string traded
+    }
+;;
+
+let child_fill (o : Plan.Order.t) size =
+  Follower_core.Input.Mirror
+    (Follower_fill
+       { time_ns = 0
+       ; symbol = o.symbol
+       ; side = o.side
+       ; size = Size.of_string size
+       ; price = Price.of_string "100010"
+       ; fee = Usd.zero
+       ; closed_pnl = Usd.zero
+       ; cloid = Some o.cloid
+       })
+;;
+
+let places (out : Follower_core.Output.t) = Plan.places out.plan
+
+let print_wire (out : Follower_core.Output.t) =
+  List.iter out.plan.actions ~f:(function
+    | Place o ->
+      printf
+        "place %s %s %s @ %s%s\n"
+        (Cloid.to_string o.cloid)
+        (Sexp.to_string (Market_data.Side.sexp_of_t o.side))
+        (Size.to_string o.size)
+        (Price.to_string o.limit_px)
+        (if List.mem out.post_only o.cloid ~equal:Cloid.equal then " post-only" else "")
+    | Cancel { cloid; _ } -> printf "cancel %s\n" (Cloid.to_string cloid));
+  List.iter out.reports ~f:(fun r ->
+    printf
+      "report %s %s filled %s of %s, shortfall %.2f USD\n"
+      r.algo
+      (Execution_algos.Cost_report.Outcome.to_string r.outcome)
+      (Size.to_string r.filled)
+      (Size.to_string r.target)
+      r.shortfall)
+;;
+
+let%expect_test "twap: the parent waits for market ticks, children carry derived ids" =
+  let algo : Exec_algo.t =
+    Twap { duration_ms = 4_000; slices = 2; max_participation = None }
+  in
+  let t = Follower_core.create ~follow:(follow_with algo) ~specs in
+  (* the leader holds 1 BTC: the mirror wants 0.1, as one parent, nothing sent yet *)
+  let t, out = Follower_core.apply t (resync ~leader:[ btc, "1" ] ~follower:[] ()) in
+  print_wire out;
+  print_s [%sexp (Follower_core.market_symbols t : Symbol.t list)];
+  [%expect {| (BTC) |}];
+  let step t input =
+    let t, out = Follower_core.apply t input in
+    print_wire out;
+    t, out
+  in
+  let t, out = step t (market ~s:0 ~bid:"99990" ~ask:"100010" ~traded:"5" ()) in
+  [%expect {| place 0x01eade50000000000000000000000000 Buy 0.05 @ 100200 |}];
+  let first = List.hd_exn (places out) in
+  let t, _ = step t (child_fill first "0.05") in
+  let t, _ = step t (Mirror (Order_closed first.cloid)) in
+  [%expect {| |}];
+  (* a resync while the parent is open: the mirror counts it in flight, plans nothing *)
+  let t, _ = step t (resync ~leader:[ btc, "1" ] ~follower:[ btc, "0.05" ] ()) in
+  [%expect {| |}];
+  let t, out = step t (market ~s:2 ~bid:"99990" ~ask:"100010" ~traded:"6" ()) in
+  [%expect {| place 0x01eade50000000000000010000000000 Buy 0.05 @ 100200 |}];
+  let second = List.hd_exn (places out) in
+  let t, _ = step t (child_fill second "0.05") in
+  let t, _ = step t (Mirror (Order_closed second.cloid)) in
+  [%expect {| report twap filled filled 0.1 of 0.1, shortfall 5.50 USD |}];
+  print_s
+    [%message
+      ""
+        ~positions:(t.mirror.follower_positions : Size.t Mirror.Symbol_map.t)
+        ~pending:(t.mirror.pending : Mirror.Pending.t list)
+        ~execs:(List.length t.execs : int)];
+  [%expect {| ((positions ((BTC 0.1))) (pending ()) (execs 0)) |}]
+;;
+
+let%expect_test "passive: a post-only child; pause cancels it and closes the parent" =
+  let t =
+    Follower_core.create
+      ~follow:
+        (follow_with Exec_algo.Stable.V1.(Passive { display = 1.; timeout_ms = 30_000 }))
+      ~specs
+  in
+  let t, _ = Follower_core.apply t (resync ~leader:[ btc, "1" ] ~follower:[] ()) in
+  let t, out =
+    Follower_core.apply t (market ~s:0 ~bid:"99990" ~ask:"100010" ~traded:"5" ())
+  in
+  print_wire out;
+  let child = List.hd_exn (places out) in
+  print_s [%sexp (Follower_core.is_resting_child t child.cloid : bool)];
+  [%expect
+    {|
+    place 0x01eade50000000000000000000000000 Buy 0.1 @ 99990 post-only
+    true
+    |}];
+  let t, out = Follower_core.apply t (Pause "manual") in
+  print_wire out;
+  [%expect {| cancel 0x01eade50000000000000000000000000 |}];
+  let t, out = Follower_core.apply t (Mirror (Order_closed child.cloid)) in
+  print_wire out;
+  print_s [%sexp (t.mirror.pending : Mirror.Pending.t list)];
+  [%expect
+    {|
+    report passive cancelled filled 0 of 0.1, shortfall 0.00 USD
+    ()
+    |}]
+;;
+
+let%expect_test "a parent below the minimum order goes out at once" =
+  let algo : Exec_algo.t =
+    Twap { duration_ms = 4_000; slices = 2; max_participation = None }
+  in
+  let t = Follower_core.create ~follow:(follow_with algo) ~specs in
+  (* a follower of 5 USD holds the scaled 0.00005 BTC; the leader closes: the full close
+     (5 USD, under the 10 USD minimum) goes out as one IOC *)
+  let t, _ =
+    Follower_core.apply
+      t
+      (resync ~leader:[ btc, "1" ] ~follower:[ btc, "0.00005" ] ~follower_equity:"5" ())
+  in
+  let t, out = Follower_core.apply t (position btc "0" "100000") in
+  print_wire out;
+  print_s [%sexp (Follower_core.market_symbols t : Symbol.t list)];
+  [%expect
+    {|
+    place 0x01eade50000000000000000000000000 Sell 0.00005 @ 99800
+    ()
+    |}]
+;;
