@@ -14,7 +14,7 @@ Workspace-wide rules, the repository map and the CI model are in
 
 | Path | Holds |
 | --- | --- |
-| `lib/` | The `hl_copy_engine` library: `Follower_core`, `Journal`, `Leader_hub`, `Rate_limit`, `Follower`, `Engine`, `Key_source`, `Metrics`, `Reject`, `Safety` ([lib/AGENTS.md](lib/AGENTS.md)) |
+| `lib/` | The `hl_copy_engine` library: `Follower_core`, `Journal`, `Leader_hub`, `Rate_limit`, `Follower`, `Engine`, `Key_source`, `Metrics`, `Reject`, `Safety`, `Algo_bridge` ([lib/AGENTS.md](lib/AGENTS.md)) |
 | `bin/` | The `hl-copy-engine` executable: `run`, `approve-agent`, `replay` ([bin/AGENTS.md](bin/AGENTS.md)) |
 | `test/` | Pure-core, journal, rate limit, leader hub, and end-to-end tests against `hl-sim` ([test/AGENTS.md](test/AGENTS.md)) |
 | `scripts/` | `e2e-sim.sh`: the engine on one follow against `hl-sim` for 60 seconds |
@@ -56,8 +56,8 @@ Format only this repository, after the tests pass:
 
 ## Dependencies and dependents
 
-- Depends on `hl-copy-core`, `hl-client`, `hl-protocol`, `market-data`, `exchange-core` and
-  `fixed-decimal`. Test-only: `hl-sim` and `exchange-core-engine`. The pin order is in
+- Depends on `hl-copy-core`, `execution-algos`, `hl-client`, `hl-protocol`, `market-data`,
+  `exchange-core` and `fixed-decimal`. Test-only: `hl-sim` and `exchange-core-engine`. The pin order is in
   `.github/workflows/ci.yml`.
 - Used by `../hl-copy-api` (writes the follow files and the key store, reads `/status`) and by the
   deployment files in `../infra` (`compose/`, `charts/`).
