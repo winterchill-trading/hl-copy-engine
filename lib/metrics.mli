@@ -38,11 +38,21 @@ type t =
   ; mutable builder_fee_orders : int (** orders sent with the [builder] field *)
   ; mutable builder_fee_skipped : int
   (** orders sent without it because the follower has not approved the fee *)
+  ; parents : int Hashtbl.M(String).t
+  (** finished parent orders, keyed ["<algo> <outcome>"] *)
+  ; arrival_slippage_bps : Summary.t (** per filled parent, adverse positive *)
+  ; mutable shortfall_usd : float (** implementation shortfall summed over parents *)
+  ; mutable exec_fees_usd : float (** fees in the cost reports (estimated for IOCs) *)
+  ; mutable target_notional_usd : float (** parents' size at their arrival prices *)
   }
 [@@deriving sexp_of]
 
 val create : unit -> t
 val reject : t -> Reject.t -> unit
+
+(** Counts a finished parent's cost report. *)
+val parent : t -> Execution_algos.Cost_report.t -> unit
+
 val total_rejects : t -> int
 
 (** Prometheus text exposition of several follows, labelled

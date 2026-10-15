@@ -65,6 +65,11 @@ type t =
   ; mutable paused : bool
   ; mutable builder_fee_orders : int
   ; mutable builder_fee_skipped : int
+  ; parents : int Hashtbl.M(String).t
+  ; arrival_slippage_bps : Summary.t
+  ; mutable shortfall_usd : float
+  ; mutable exec_fees_usd : float
+  ; mutable target_notional_usd : float
   }
 [@@deriving sexp_of]
 
@@ -84,7 +89,25 @@ let create () =
   ; paused = false
   ; builder_fee_orders = 0
   ; builder_fee_skipped = 0
+  ; parents = Hashtbl.create (module String)
+  ; arrival_slippage_bps = Summary.create ()
+  ; shortfall_usd = 0.
+  ; exec_fees_usd = 0.
+  ; target_notional_usd = 0.
   }
+;;
+
+let parent t (r : Execution_algos.Cost_report.t) =
+  Hashtbl.incr
+    t.parents
+    (sprintf "%s %s" r.algo (Execution_algos.Cost_report.Outcome.to_string r.outcome));
+  if Market_data.Size.is_positive r.filled
+  then Summary.add t.arrival_slippage_bps r.arrival_slippage_bps;
+  t.shortfall_usd <- t.shortfall_usd +. r.shortfall;
+  t.exec_fees_usd <- t.exec_fees_usd +. r.fees;
+  t.target_notional_usd
+  <- t.target_notional_usd
+     +. (Market_data.Size.to_float r.target *. Market_data.Price.to_float r.arrival_px)
 ;;
 
 let reject t r = Hashtbl.incr t.rejects (Reject.label r)
@@ -156,6 +179,28 @@ let prometheus follows =
     (fun t -> t.builder_fee_skipped);
   gauge "hl_copy_paused" "1 when the follow is paused or stopped." (fun t ->
     if t.paused then 1. else 0.);
+  family
+    "hl_copy_parents_total"
+    "counter"
+    "Parent orders finished, by execution algorithm and outcome."
+    (fun t ->
+       Hashtbl.to_alist t.parents
+       |> List.sort ~compare:[%compare: string * int]
+       |> List.map ~f:(fun (key, n) ->
+         let algo, outcome = String.lsplit2_exn key ~on:' ' in
+         "", [ "algo", algo; "outcome", outcome ], Int.to_string n));
+  summary
+    "hl_copy_arrival_slippage_bps"
+    "Average fill price of a parent against its arrival mid, adverse positive."
+    (fun t -> t.arrival_slippage_bps);
+  gauge
+    "hl_copy_shortfall_usd"
+    "Implementation shortfall of finished parents (execution, missed move, fees)."
+    (fun t -> t.shortfall_usd);
+  gauge
+    "hl_copy_exec_fees_usd"
+    "Fees of finished parents (IOC fees estimated at the base tier)."
+    (fun t -> t.exec_fees_usd);
   Buffer.contents buf
 ;;
 
@@ -189,5 +234,18 @@ let to_json t =
     ; "equity_change", `Float t.equity_change
     ; "builder_fee_orders", `Int t.builder_fee_orders
     ; "builder_fee_skipped", `Int t.builder_fee_skipped
+    ; ( "parents"
+      , `Assoc
+          (Hashtbl.to_alist t.parents
+           |> List.sort ~compare:[%compare: string * int]
+           |> List.map ~f:(fun (k, v) -> k, `Int v)) )
+    ; "arrival_slippage_bps", summary_json t.arrival_slippage_bps
+    ; "shortfall_usd", `Float t.shortfall_usd
+    ; "exec_fees_usd", `Float t.exec_fees_usd
+    ; ( "shortfall_bps"
+      , `Float
+          (if Float.(t.target_notional_usd > 0.)
+           then t.shortfall_usd /. t.target_notional_usd *. 10_000.
+           else 0.) )
     ]
 ;;
