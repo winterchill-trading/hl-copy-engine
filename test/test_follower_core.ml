@@ -91,7 +91,13 @@ let%expect_test "resync plans the scaled target; a fill closes the order" =
   let t = run t [ filled (last_place out) "0.1"; closed (last_place out) ] in
   [%expect
     {|
-    ((plan ((actions ()) (notes ()))) (notices ()))
+    ((plan ((actions ()) (notes ()))) (notices ())
+     (reports
+      (((algo immediate) (side Buy) (target 0.1) (filled 0.1) (avg_px 100200)
+        (arrival_px 100000) (end_px 100000) (arrival_ns 0) (end_ns 0)
+        (children 1) (maker_filled 0) (fees 4.509) (arrival_slippage_bps 20)
+        (shortfall 24.508999999999446) (shortfall_bps 24.508999999999446)
+        (outcome Filled)))))
     ((plan ((actions ()) (notes ()))) (notices ()))
     |}];
   print_s
@@ -121,7 +127,12 @@ let%expect_test "an insufficient-margin reject caps leverage at what the account
     ((plan ((actions ()) (notes ())))
      (notices
       ((Rejected Insufficient_margin)
-       (Margin_capped (leverage 0.2) (shortfall 10000)))))
+       (Margin_capped (leverage 0.2) (shortfall 10000))))
+     (reports
+      (((algo immediate) (side Buy) (target 0.1) (filled 0) (avg_px 0)
+        (arrival_px 100000) (end_px 100000) (arrival_ns 0) (end_ns 0)
+        (children 1) (maker_filled 0) (fees 0) (arrival_slippage_bps 0)
+        (shortfall 0) (shortfall_bps 0) (outcome Unfilled)))))
     |}];
   print_s
     [%message
@@ -178,7 +189,12 @@ let%expect_test "pause cancels, drops places, resume replans; an agent reject pa
   let t = run t [ closed o; position btc "2" "100000" ] in
   [%expect
     {|
-    ((plan ((actions ()) (notes ()))) (notices ()))
+    ((plan ((actions ()) (notes ()))) (notices ())
+     (reports
+      (((algo immediate) (side Buy) (target 0.1) (filled 0) (avg_px 0)
+        (arrival_px 100000) (end_px 100000) (arrival_ns 0) (end_ns 0)
+        (children 1) (maker_filled 0) (fees 0) (arrival_slippage_bps 0)
+        (shortfall 0) (shortfall_bps 0) (outcome Cancelled)))))
     ((plan ((actions ()) (notes ())))
      (notices
       ((Dropped_while_paused
@@ -213,7 +229,12 @@ let%expect_test "pause cancels, drops places, resume replans; an agent reject pa
   [%expect
     {|
     ((plan ((actions ()) (notes ())))
-     (notices ((Rejected Agent_invalid) (Paused "agent rejected"))))
+     (notices ((Rejected Agent_invalid) (Paused "agent rejected")))
+     (reports
+      (((algo immediate) (side Buy) (target 0.2) (filled 0) (avg_px 0)
+        (arrival_px 100000) (end_px 100000) (arrival_ns 0) (end_ns 0)
+        (children 1) (maker_filled 0) (fees 0) (arrival_slippage_bps 0)
+        (shortfall 0) (shortfall_bps 0) (outcome Unfilled)))))
     |}];
   print_s [%sexp (t.status : Follower_core.Status.t)];
   [%expect {| (Paused "agent rejected") |}];
@@ -268,9 +289,9 @@ let%expect_test "replay: the same inputs give the same outputs, through bin_io" 
     ]
   in
   let encode input =
-    Bin_prot.Writer.to_string Follower_core.Input.Stable.V1.bin_writer_t input
+    Bin_prot.Writer.to_string Follower_core.Input.Stable.V2.bin_writer_t input
   in
-  let decode s = Bin_prot.Reader.of_string Follower_core.Input.Stable.V1.bin_reader_t s in
+  let decode s = Bin_prot.Reader.of_string Follower_core.Input.Stable.V2.bin_reader_t s in
   let t1, out1 = ok_exn (Follower_core.replay inputs) in
   let t2, out2 =
     ok_exn (Follower_core.replay (List.map inputs ~f:(Fn.compose decode encode)))
