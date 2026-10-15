@@ -11,6 +11,7 @@
   core_unix.filename_unix
   exchange-core
   exchange-core-engine
+  execution-algos
   hl-client
   hl-copy-core
   hl-copy-engine
