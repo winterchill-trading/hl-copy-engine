@@ -12,23 +12,50 @@ module Entry = struct
             }
         | Output of
             { time_ns : int
-            ; output : Follower_core.Output.t
+            ; output : Follower_core.Output.Stable.V1.t
             }
       [@@deriving bin_io, sexp, compare, equal]
     end
+
+    module V2 = struct
+      type t =
+        | Input of
+            { time_ns : int
+            ; input : Follower_core.Input.Stable.V2.t
+            }
+        | Output of
+            { time_ns : int
+            ; output : Follower_core.Output.Stable.V2.t
+            }
+        | Legacy_output of
+            { time_ns : int
+            ; output : Follower_core.Output.Stable.V1.t
+            }
+      [@@deriving bin_io, sexp, compare, equal]
+
+      let of_v1 : V1.t -> t = function
+        | Input { time_ns; input } ->
+          Input { time_ns; input = Follower_core.Input.Stable.V2.of_v1 input }
+        | Output { time_ns; output } -> Legacy_output { time_ns; output }
+      ;;
+    end
   end
 
-  include Stable.V1
+  include Stable.V2
 end
 
-let digest = Bin_prot.Shape.eval_to_digest_string Entry.Stable.V1.bin_shape_t
+let digest = Bin_prot.Shape.eval_to_digest_string Entry.Stable.V2.bin_shape_t
+let digest_v1 = Bin_prot.Shape.eval_to_digest_string Entry.Stable.V1.bin_shape_t
 
 let dir ~root (follow : Follower_config.t) =
   root
   ^/ sprintf "%s-%s" (Address.to_string follow.follower) (Address.to_string follow.leader)
 ;;
 
-let file_name date = Date.to_string date ^ ".journal"
+(* Version 2 files get their own name, so a restart on the day of an upgrade never appends
+   to a version 1 file (the writer refuses another digest). Names sort by date, and a
+   day's version 1 file before its version 2 one. *)
+let file_name date = Date.to_string date ^ ".v2.journal"
 
 module Writer = struct
   type t = Entry.t Market_data.Framed.Writer.t
@@ -37,7 +64,7 @@ module Writer = struct
     Market_data.Framed.Writer.create
       ?flush_interval
       ~digest
-      Entry.Stable.V1.bin_writer_t
+      Entry.Stable.V2.bin_writer_t
       ~path_for_date:(fun date -> dir ^/ file_name date)
       ()
   ;;
@@ -72,10 +99,21 @@ let load dir =
     in
     let%map entries =
       Deferred.List.map ~how:`Sequential files ~f:(fun name ->
-        let%map entries, _tail =
-          Market_data.Framed.load_file ~digest Entry.Stable.V1.bin_reader_t (dir ^/ name)
-        in
-        entries)
+        let path = dir ^/ name in
+        match%bind Market_data.Framed.read_digest path with
+        | Some d when String.equal d digest_v1 ->
+          let%map entries, _tail =
+            Market_data.Framed.load_file
+              ~digest:digest_v1
+              Entry.Stable.V1.bin_reader_t
+              path
+          in
+          List.map entries ~f:Entry.Stable.V2.of_v1
+        | _ ->
+          let%map entries, _tail =
+            Market_data.Framed.load_file ~digest Entry.Stable.V2.bin_reader_t path
+          in
+          entries)
     in
     List.concat entries
 ;;
@@ -83,7 +121,7 @@ let load dir =
 let inputs entries =
   List.filter_map entries ~f:(function
     | Entry.Input { input; _ } -> Some input
-    | Output _ -> None)
+    | Output _ | Legacy_output _ -> None)
 ;;
 
 module Verified = struct
@@ -109,15 +147,27 @@ let verify entries =
       ~f:(fun (index, outputs, orders, mismatch) entry ->
         match entry with
         | Input _ -> index + 1, outputs, orders, mismatch
-        | Output { output; _ } ->
+        | Output _ | Legacy_output _ ->
+          (* a version 1 output predates parents and reports: compare what it had *)
+          let output, same =
+            match entry with
+            | Legacy_output { output; _ } ->
+              let output = Follower_core.Output.Stable.V2.of_v1 output in
+              ( output
+              , fun replayed ->
+                  [%equal: Follower_core.Output.Stable.V1.t]
+                    (Follower_core.Output.Stable.V2.to_v1 output)
+                    (Follower_core.Output.Stable.V2.to_v1 replayed) )
+            | Output { output; _ } ->
+              output, fun replayed -> [%equal: Follower_core.Output.t] output replayed
+            | Input _ -> assert false
+          in
           let orders = orders + List.length (Plan.places output.plan) in
           let mismatch =
             match mismatch with
             | Some _ -> mismatch
             | None ->
-              if index >= 0
-                 && index < Array.length replayed
-                 && [%equal: Follower_core.Output.t] output replayed.(index)
+              if index >= 0 && index < Array.length replayed && same replayed.(index)
               then None
               else
                 Some

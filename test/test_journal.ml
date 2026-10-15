@@ -63,7 +63,7 @@ let%expect_test "write, reload across a day boundary, verify" =
   let%bind () = Journal.Writer.close w in
   let%bind files = Sys.readdir dir in
   print_s [%sexp (Array.to_list files |> List.sort ~compare:String.compare : string list)];
-  [%expect {| (2026-10-13.journal 2026-10-14.journal) |}];
+  [%expect {| (2026-10-13.v2.journal 2026-10-14.v2.journal) |}];
   let%bind entries = Journal.load dir in
   let verified = ok_exn (Journal.verify entries) in
   print_s
@@ -98,8 +98,89 @@ let%expect_test "write, reload across a day boundary, verify" =
   return ()
 ;;
 
-let%expect_test "entry digest (changes need a new Stable version)" =
+let%expect_test "entry digests (changes need a new Stable version)" =
   print_endline Journal.digest;
-  [%expect {| be6e0083a6a5e35db171a1d14cecb1a7 |}];
+  (* the version 1 digest is the one every journal before execution algorithms carries *)
+  print_endline Journal.digest_v1;
+  [%expect
+    {|
+    3b696e1a7d85f4da3caf9f38c7556e31
+    be6e0083a6a5e35db171a1d14cecb1a7
+    |}];
+  return ()
+;;
+
+let mirror_event : Follower_core.Input.t -> Mirror.Event.t = function
+  | Mirror e -> e
+  | _ -> assert false
+;;
+
+let%expect_test "a version 1 journal still loads, replays and verifies" =
+  let root = Filename_unix.temp_dir "hl-copy-journal-v1" "" in
+  let dir = Journal.dir ~root follow in
+  (* written the way the engine did before execution algorithms *)
+  let w =
+    Market_data.Framed.Writer.create
+      ~digest:Journal.digest_v1
+      Journal.Entry.Stable.V1.bin_writer_t
+      ~path_for_date:(fun date -> dir ^/ Date.to_string date ^ ".journal")
+      ()
+  in
+  let v1_inputs : Follower_core.Input.Stable.V1.t list =
+    [ Configure { follow = Follower_config.Stable.V2.to_v1 follow; specs }
+    ; Mirror (mirror_event (List.nth_exn inputs 1))
+    ; Mirror (mirror_event (List.nth_exn inputs 2))
+    ]
+  in
+  let state = ref None in
+  List.iteri v1_inputs ~f:(fun i input ->
+    let time = Time_ns.add t0 (Time_ns.Span.of_int_sec i) in
+    let time_ns = Time_ns.to_int_ns_since_epoch time in
+    Market_data.Framed.Writer.append
+      w
+      (Journal.Entry.Stable.V1.Input { time_ns; input })
+      ~time;
+    let t, output =
+      match !state, Follower_core.Input.Stable.V2.of_v1 input with
+      | None, Configure { follow; specs } ->
+        Follower_core.create ~follow ~specs, Follower_core.Output.empty
+      | Some t, input -> Follower_core.apply t input
+      | None, _ -> assert false
+    in
+    state := Some t;
+    Market_data.Framed.Writer.append
+      w
+      (Journal.Entry.Stable.V1.Output
+         { time_ns; output = Follower_core.Output.Stable.V2.to_v1 output })
+      ~time);
+  let%bind () = Market_data.Framed.Writer.close w in
+  (* a restart on the same day writes a version 2 file next to it *)
+  let w2 = Journal.Writer.create ~dir () in
+  Journal.Writer.input w2 ~time:(Time_ns.add t0 (Time_ns.Span.of_int_sec 3)) Resume;
+  Journal.Writer.output
+    w2
+    ~time:(Time_ns.add t0 (Time_ns.Span.of_int_sec 3))
+    Follower_core.Output.empty;
+  let%bind () = Journal.Writer.close w2 in
+  let%bind files = Sys.readdir dir in
+  print_s [%sexp (Array.to_list files |> List.sort ~compare:String.compare : string list)];
+  let%bind entries = Journal.load dir in
+  let verified = ok_exn (Journal.verify entries) in
+  print_s
+    [%message
+      ""
+        ~entries:(List.length entries : int)
+        ~legacy:
+          (List.count entries ~f:(function
+             | Legacy_output _ -> true
+             | Input _ | Output _ -> false)
+           : int)
+        ~mismatch:(Option.is_some verified.mismatch : bool)
+        ~orders:(verified.orders : int)];
+  [%expect
+    {|
+    (2026-10-13.journal 2026-10-14.journal 2026-10-14.v2.journal)
+    ((entries 8) (legacy 3) (mismatch false) (orders 2))
+    |}];
   return ()
 ;;
