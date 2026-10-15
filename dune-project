@@ -36,5 +36,6 @@
   market-data
   hl-client
   hl-copy-core
+  execution-algos
   (hl-sim :with-test)
   (exchange-core-engine :with-test)))

@@ -9,6 +9,7 @@
   hl-protocol
   hl-client
   hl-copy-core
+  execution-algos
   market-data
   uri
   yojson)
