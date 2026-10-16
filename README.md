@@ -324,6 +324,9 @@ the agent keys through `Engine.Config.signer_for`.
   before fees.
 - Address-based request limits, liquidation flags and a back-off of the resync interval
   under rate limiting (see the design's failure table).
+- Execution algorithms: VWAP uses a uniform volume profile (no recorded trades in the
+  engine); `hl_copy_lag_ms` has no samples for children sent on market ticks; the API and
+  the web app do not offer an algorithm yet (set it in the follow file).
 
 ## Build
 
