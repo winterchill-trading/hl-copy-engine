@@ -190,6 +190,34 @@ How it runs:
   (`<date>.journal`) still load and replay; their outputs are compared on plan and
   notices only.
 
+## No-trade band
+
+A follow file may carry a `band` (`Hl_copy_core.No_trade_band`, left out of files
+without one, so the API's files and older ones read unchanged). The mirror then sends a
+rebalance only when the gap between the follower's position (plus in-flight orders) and
+its target is outside a band whose half-width is `cost x equity / (risk_aversion x vol^2)`
+(USD notional), and trades to the band's edge (part of the way for the quadratic-cost
+variant); a leader close is always copied in full. See hl-copy-core's README for the
+derivation.
+
+```text
+(band ((fee_bps 4.5) (slippage (Fixed_bps 5)) (risk_aversion 20) (vol_bps 300)
+       (cost_model Proportional)))
+```
+
+- The cost is `fee_bps` plus the slippage: a fixed estimate, or `(Impact (fallback_bps
+  5))`, where the follower opens the coin's market feed and, on every market tick, walks
+  the book with execution-algos' `Impact.estimate` for the order that would close the
+  current gap (one lot when there is none); the estimate is set in the mirror from the
+  journaled tick, so a replay sets the same one.
+- A rebalance the band holds back is a `Within_band` note in the output's plan (gap,
+  half-width, the fee and slippage it would have cost), journaled with every output;
+  `hl_copy_band_skips_total` and `hl_copy_band_saved_usd` count them, and `/status` shows
+  the follower's `band`: its config, half-width at the configured cost, skips, saved cost,
+  the per-coin slippage estimates and the last 20 skips.
+- The journal moved to entries version 3 (`<date>.v3.journal`: follow configs with the
+  band, plans with `Within_band` notes). Version 2 and 1 files still load and verify.
+
 ## Metrics
 
 `/metrics` (Prometheus text, labels `follower` and `leader`): `hl_copy_leader_updates_total`,
@@ -203,7 +231,9 @@ no_liquidity, agent, rate_limited, other), `hl_copy_resyncs_total`,
 sent with the builder field), `hl_copy_builder_fee_skipped_total` (orders sent without it
 because the follower has not approved the fee), `hl_copy_parents_total{algo,outcome}`
 (finished parents), `hl_copy_arrival_slippage_bps` (summary, per filled parent),
-`hl_copy_shortfall_usd` and `hl_copy_exec_fees_usd` (summed cost reports); and per engine
+`hl_copy_shortfall_usd` and `hl_copy_exec_fees_usd` (summed cost reports),
+`hl_copy_band_skips_total` and `hl_copy_band_saved_usd` (rebalances the no-trade band held
+back and their estimated cost); and per engine
 `hl_copy_followers`,
 `hl_copy_config_errors`, `hl_copy_rest_weight_total`.
 
@@ -213,7 +243,7 @@ follower entry carries what hl-copy-api's `/me` reads, `follower`, `leader`, `st
 (attributed, USD), `positions` (`coin`, `size`, `entry_px`, `unrealized_pnl`, `leverage`,
 all numbers) and `last_error`, then details: its agent address, pause reason, the leader's source
 (websocket or polling), both equities and positions, pending orders, margin cap,
-shortfall, last resync, the metrics and `builder` (`null` without `-builder`, else
+shortfall, last resync, the metrics, `band` (`null` without one) and `builder` (`null` without `-builder`, else
 `address`, `fee_tenths_bp`, `approved`, `max_approved_tenths_bp` and a `note` saying why
 orders go out without the builder); the followed leaders with their follower counts;
 follow files that failed to apply.
@@ -260,6 +290,27 @@ simulated book), from the script's `execution` summary of the finished parents:
 | `(Twap (duration_ms 6000) (slices 3) ...)` | 9 | 99.99% | 1.3 | 5.8 | 28 | identical |
 | default `Adaptive` | 9 | 99.93% | 6.6 | 11.0 | 21 | identical |
 
+`BAND` sets the follow's no-trade band, and the script ends with a summary line: the
+follower's fill records and fees (its `userFills`), the band's skips and saved cost, and
+the tracking error (root mean square over the 5 s samples of `|target - position| x mid /
+equity`, the target being the mode's image of the leader's position). Three 60 s runs on
+2026-10-16 (seed 7, `SAMPLE_S=5`, `Immediate`, otherwise as above; the follower here has
+$1,000,000, so the default band's half-width is about 52,800 USD, half a BTC):
+
+| `BAND` | Orders | Fill records | Fees (USD) | Band skips | Saved (USD) | Tracking error (bps) | Journal replay |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| none | 9 | 227 | 100.77 | 0 | 0 | 611 | identical |
+| `risk_aversion 200` (half-width 5,280 USD) | 8 | 255 | 106.13 | 1 | 3.90 | 1,167 | identical |
+| default (`risk_aversion 20`) | 7 | 179 | 79.75 | 2 | 97.72 | 1,076 | identical |
+
+With the default band the follower stopped at -1.77 BTC against the leader's -2.28 (a
+gap of 51,000 USD, inside the edge) and paid a fifth less in fees for a larger tracking
+error. The leader's path differs between runs (the follower trades on the same simulated
+book) and most of the tracking error on this thin book is IOC remainders, so the three
+rows compare costs more than tracking. With `(Impact (fallback_bps 5))` the follower
+subscribed to the BTC book, journaled about 100 market ticks (129 inputs against 23 to 27 without) and replayed identically; its
+slippage estimate was 3.4 bp.
+
 On the thin simulated book a single IOC finds a fraction of the size within the bound
 and leaves the rest to the next resync (the unfilled part counts in the shortfall at the
 price move it missed); slicing waits for the noise traders to refill the book. The
@@ -270,8 +321,10 @@ shortfall includes the estimated taker fee (4.5 bp).
 `dune test` runs, with no network beyond loopback:
 
 - `test_follower_core.ml`: the pure core: scaled targets, margin cap and its lifting,
-  pause and resume, config changes, agent rejects, and replay through bin_io.
-- `test_journal.ml`: day files, reload, verification and a tampered output.
+  pause and resume, config changes, agent rejects, replay through bin_io, band skips in
+  the outputs and Impact slippage estimates from market ticks.
+- `test_journal.ml`: day files, reload, verification and a tampered output; version 1
+  and version 2 files next to a version 3 one.
 - `test_rate_limit.ml`, `test_reject.ml`, `test_metrics.ml`, `test_safety.ml`.
 - `test_leader_hub.ml`: one leader over the websocket and one polled past the limit, two
   consumers each, against hl-sim.
@@ -301,9 +354,11 @@ shortfall includes the estimated taker fee (4.5 bp).
 
 ```ocaml
 Hl_copy_engine.Safety.check_url : Uri.t -> unit Or_error.t
-Hl_copy_engine.Follower_core     (* Input.t (Stable.V2, V1 read), Output.t (post_only,
-                                    reports), Exec, apply, replay, market_symbols *)
-Hl_copy_engine.Journal           (* Entry.Stable.V2 (V1 read), Writer, load, verify, dir *)
+Hl_copy_engine.Follower_core     (* Input.t (Stable.V3, V1 and V2 read), Output.t
+                                    (post_only, reports, band notes), Exec, apply,
+                                    replay, market_symbols *)
+Hl_copy_engine.Journal           (* Entry.Stable.V3 (V1, V2 read), Writer, load, verify,
+                                    dir *)
 Hl_copy_engine.Algo_bridge       (* Exec_algo.t <-> Execution_algos.Algo.t *)
 Hl_copy_engine.Leader_hub        (* create, subscribe ~leader, source, leaders *)
 Hl_copy_engine.Follower          (* Signer.t, Config.t, start, pause, resume, reconfigure,
