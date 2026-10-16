@@ -105,8 +105,14 @@ let%expect_test "prometheus text" =
     # HELP hl_copy_exec_fees_usd Fees of finished parents (IOC fees estimated at the base tier).
     # TYPE hl_copy_exec_fees_usd gauge
     hl_copy_exec_fees_usd{follower="0x00000000000000000000000000000000000000f1",leader="0x1eade50000000000000000000000000000000000"} 0
+    # HELP hl_copy_band_skips_total Rebalances held back because the gap was inside the follow's no-trade band.
+    # TYPE hl_copy_band_skips_total counter
+    hl_copy_band_skips_total{follower="0x00000000000000000000000000000000000000f1",leader="0x1eade50000000000000000000000000000000000"} 0
+    # HELP hl_copy_band_saved_usd Estimated cost (fee and slippage) of the rebalances the band held back.
+    # TYPE hl_copy_band_saved_usd gauge
+    hl_copy_band_saved_usd{follower="0x00000000000000000000000000000000000000f1",leader="0x1eade50000000000000000000000000000000000"} 0
     |}];
   print_endline (Yojson.Safe.to_string (Metrics.to_json t));
   [%expect
-    {| {"leader_updates":4,"orders":3,"fills":2,"rejects":{"margin":1,"no_liquidity":2},"resyncs":0,"resync_failures":0,"resync_repairs":0,"lag_ms":{"count":1,"p50":12.0,"p99":12.0,"max":12.0},"slippage_bps":{"count":1,"p50":1.5,"p99":1.5,"max":1.5},"realized_pnl":-2.25,"unrealized_pnl":0.0,"equity_change":0.0,"builder_fee_orders":0,"builder_fee_skipped":0,"parents":{},"arrival_slippage_bps":{"count":0,"p50":null,"p99":null,"max":null},"shortfall_usd":0.0,"exec_fees_usd":0.0,"shortfall_bps":0.0} |}]
+    {| {"leader_updates":4,"orders":3,"fills":2,"rejects":{"margin":1,"no_liquidity":2},"resyncs":0,"resync_failures":0,"resync_repairs":0,"lag_ms":{"count":1,"p50":12.0,"p99":12.0,"max":12.0},"slippage_bps":{"count":1,"p50":1.5,"p99":1.5,"max":1.5},"realized_pnl":-2.25,"unrealized_pnl":0.0,"equity_change":0.0,"builder_fee_orders":0,"builder_fee_skipped":0,"parents":{},"arrival_slippage_bps":{"count":0,"p50":null,"p99":null,"max":null},"shortfall_usd":0.0,"exec_fees_usd":0.0,"shortfall_bps":0.0,"band_skips":0,"band_saved_usd":0.0} |}]
 ;;
