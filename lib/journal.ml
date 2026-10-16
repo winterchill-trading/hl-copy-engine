@@ -39,12 +39,40 @@ module Entry = struct
         | Output { time_ns; output } -> Legacy_output { time_ns; output }
       ;;
     end
+
+    module V3 = struct
+      type t =
+        | Input of
+            { time_ns : int
+            ; input : Follower_core.Input.Stable.V3.t
+            }
+        | Output of
+            { time_ns : int
+            ; output : Follower_core.Output.Stable.V3.t
+            }
+        | Legacy_output of
+            { time_ns : int
+            ; output : Follower_core.Output.Stable.V1.t
+            }
+      [@@deriving bin_io, sexp, compare, equal]
+
+      let of_v2 : V2.t -> t = function
+        | Input { time_ns; input } ->
+          Input { time_ns; input = Follower_core.Input.Stable.V3.of_v2 input }
+        | Output { time_ns; output } ->
+          Output { time_ns; output = Follower_core.Output.Stable.V3.of_v2 output }
+        | Legacy_output { time_ns; output } -> Legacy_output { time_ns; output }
+      ;;
+
+      let of_v1 v1 = of_v2 (V2.of_v1 v1)
+    end
   end
 
-  include Stable.V2
+  include Stable.V3
 end
 
-let digest = Bin_prot.Shape.eval_to_digest_string Entry.Stable.V2.bin_shape_t
+let digest = Bin_prot.Shape.eval_to_digest_string Entry.Stable.V3.bin_shape_t
+let digest_v2 = Bin_prot.Shape.eval_to_digest_string Entry.Stable.V2.bin_shape_t
 let digest_v1 = Bin_prot.Shape.eval_to_digest_string Entry.Stable.V1.bin_shape_t
 
 let dir ~root (follow : Follower_config.t) =
@@ -52,10 +80,11 @@ let dir ~root (follow : Follower_config.t) =
   ^/ sprintf "%s-%s" (Address.to_string follow.follower) (Address.to_string follow.leader)
 ;;
 
-(* Version 2 files get their own name, so a restart on the day of an upgrade never appends
-   to a version 1 file (the writer refuses another digest). Names sort by date, and a
-   day's version 1 file before its version 2 one. *)
-let file_name date = Date.to_string date ^ ".v2.journal"
+
+(* Each version gets its own file name, so a restart on the day of an upgrade never appends
+   to an older file (the writer refuses another digest). Names sort by date, and within a
+   day version 1 ([.journal]) before 2 ([.v2.journal]) before 3. *)
+let file_name date = Date.to_string date ^ ".v3.journal"
 
 module Writer = struct
   type t = Entry.t Market_data.Framed.Writer.t
@@ -64,7 +93,7 @@ module Writer = struct
     Market_data.Framed.Writer.create
       ?flush_interval
       ~digest
-      Entry.Stable.V2.bin_writer_t
+      Entry.Stable.V3.bin_writer_t
       ~path_for_date:(fun date -> dir ^/ file_name date)
       ()
   ;;
@@ -108,10 +137,18 @@ let load dir =
               Entry.Stable.V1.bin_reader_t
               path
           in
-          List.map entries ~f:Entry.Stable.V2.of_v1
+          List.map entries ~f:Entry.Stable.V3.of_v1
+        | Some d when String.equal d digest_v2 ->
+          let%map entries, _tail =
+            Market_data.Framed.load_file
+              ~digest:digest_v2
+              Entry.Stable.V2.bin_reader_t
+              path
+          in
+          List.map entries ~f:Entry.Stable.V3.of_v2
         | _ ->
           let%map entries, _tail =
-            Market_data.Framed.load_file ~digest Entry.Stable.V2.bin_reader_t path
+            Market_data.Framed.load_file ~digest Entry.Stable.V3.bin_reader_t path
           in
           entries)
     in
@@ -152,12 +189,12 @@ let verify entries =
           let output, same =
             match entry with
             | Legacy_output { output; _ } ->
-              let output = Follower_core.Output.Stable.V2.of_v1 output in
+              let output = Follower_core.Output.Stable.V3.of_v1 output in
               ( output
               , fun replayed ->
                   [%equal: Follower_core.Output.Stable.V1.t]
-                    (Follower_core.Output.Stable.V2.to_v1 output)
-                    (Follower_core.Output.Stable.V2.to_v1 replayed) )
+                    (Follower_core.Output.Stable.V3.to_v1 output)
+                    (Follower_core.Output.Stable.V3.to_v1 replayed) )
             | Output { output; _ } ->
               output, fun replayed -> [%equal: Follower_core.Output.t] output replayed
             | Input _ -> assert false

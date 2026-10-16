@@ -1,8 +1,9 @@
 (** Per-follow journal: every {!Follower_core.Input.t} the actor applied, each followed by
     the {!Follower_core.Output.t} it produced, as Bin_prot frames in {!Market_data.Framed}
     files (one per UTC day, headed by {!digest}):
-    [<root>/<follower>-<leader>/<YYYY-MM-DD>.v2.journal]. Files from before execution
-    algorithms ([<YYYY-MM-DD>.journal], {!digest_v1}) are still read.
+    [<root>/<follower>-<leader>/<YYYY-MM-DD>.v3.journal]. Files from before execution
+    algorithms ([<YYYY-MM-DD>.journal], {!digest_v1}) and from before the no-trade band
+    ([<YYYY-MM-DD>.v2.journal], {!digest_v2}) are still read.
 
     Inputs are enough to rebuild the state ({!Follower_core.replay}); outputs are kept so
     {!verify} can check that a replay produces exactly what the live run sent. *)
@@ -45,9 +46,31 @@ module Entry : sig
 
       val of_v1 : V1.t -> t
     end
+
+    (** [V2] with the band: inputs {!Follower_core.Input.Stable.V3}, outputs
+        {!Follower_core.Output.Stable.V3}. *)
+    module V3 : sig
+      type t =
+        | Input of
+            { time_ns : int
+            ; input : Follower_core.Input.Stable.V3.t
+            }
+        | Output of
+            { time_ns : int
+            ; output : Follower_core.Output.Stable.V3.t
+            }
+        | Legacy_output of
+            { time_ns : int
+            ; output : Follower_core.Output.Stable.V1.t
+            } (** an output read from a version 1 file (never written) *)
+      [@@deriving bin_io, sexp, compare, equal]
+
+      val of_v2 : V2.t -> t
+      val of_v1 : V1.t -> t
+    end
   end
 
-  type t = Stable.V2.t =
+  type t = Stable.V3.t =
     | Input of
         { time_ns : int
         ; input : Follower_core.Input.t
@@ -63,9 +86,13 @@ module Entry : sig
   [@@deriving bin_io, sexp, compare, equal]
 end
 
-(** Hex [bin_shape] digest of {!Entry.Stable.V2.t}, in the header of every file written
-    now ([<date>.v2.journal]). *)
+(** Hex [bin_shape] digest of {!Entry.Stable.V3.t}, in the header of every file written
+    now ([<date>.v3.journal]). *)
 val digest : string
+
+(** Digest of {!Entry.Stable.V2.t} ([<date>.v2.journal] files from before the no-trade
+    band), still read by {!load}. *)
+val digest_v2 : string
 
 (** Digest of {!Entry.Stable.V1.t} ([<date>.journal] files from before execution
     algorithms), still read by {!load}. *)
@@ -87,7 +114,7 @@ module Writer : sig
 end
 
 (** Every entry of every journal file in [dir], files in date order, version 1 files
-    converted ({!Entry.Stable.V2.of_v1}). A missing directory is an empty journal. *)
+    converted ({!Entry.Stable.V3.of_v1}, {!Entry.Stable.V3.of_v2}). A missing directory is an empty journal. *)
 val load : string -> Entry.t list Deferred.t
 
 val inputs : Entry.t list -> Follower_core.Input.t list
