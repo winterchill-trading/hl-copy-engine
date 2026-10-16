@@ -63,12 +63,31 @@ let filled (o : Plan.Order.t) size =
 
 let closed (o : Plan.Order.t) = Follower_core.Input.Mirror (Order_closed o.cloid)
 
+(* Cost-report floats are rounded to 1e-6 before printing: arm64 fuses multiply-adds that
+   amd64 does not, so the last digits of [shortfall] differ between a laptop and CI. *)
+let show (out : Follower_core.Output.t) =
+  let r x = Float.round_decimal x ~decimal_digits:6 in
+  print_s
+    [%sexp
+      ({ out with
+         reports =
+           List.map out.reports ~f:(fun (c : Execution_algos.Cost_report.t) ->
+             { c with
+               fees = r c.fees
+             ; arrival_slippage_bps = r c.arrival_slippage_bps
+             ; shortfall = r c.shortfall
+             ; shortfall_bps = r c.shortfall_bps
+             })
+       }
+       : Follower_core.Output.t)]
+;;
+
 (* Feeds inputs, printing each output; [f] may compute the next inputs from the last
    output (to fill the orders it placed). *)
 let run t inputs =
   List.fold inputs ~init:t ~f:(fun t input ->
     let t, (out : Follower_core.Output.t) = Follower_core.apply t input in
-    print_s [%sexp (out : Follower_core.Output.t)];
+    show out;
     t)
 ;;
 
@@ -77,7 +96,7 @@ let last_place (out : Follower_core.Output.t) = List.last_exn (Plan.places out.p
 let%expect_test "resync plans the scaled target; a fill closes the order" =
   let t = Follower_core.create ~follow:(follow ()) ~specs in
   let t, out = Follower_core.apply t (resync ~leader:[ btc, "1" ] ~follower:[] ()) in
-  print_s [%sexp (out : Follower_core.Output.t)];
+  show out;
   [%expect
     {|
     ((plan
@@ -96,8 +115,7 @@ let%expect_test "resync plans the scaled target; a fill closes the order" =
       (((algo immediate) (side Buy) (target 0.1) (filled 0.1) (avg_px 100200)
         (arrival_px 100000) (end_px 100000) (arrival_ns 0) (end_ns 0)
         (children 1) (maker_filled 0) (fees 4.509) (arrival_slippage_bps 20)
-        (shortfall 24.508999999999446) (shortfall_bps 24.508999999999446)
-        (outcome Filled)))))
+        (shortfall 24.509) (shortfall_bps 24.509) (outcome Filled)))))
     ((plan ((actions ()) (notes ()))) (notices ()))
     |}];
   print_s
