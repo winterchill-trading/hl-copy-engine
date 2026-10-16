@@ -70,6 +70,8 @@ type t =
   ; mutable shortfall_usd : float
   ; mutable exec_fees_usd : float
   ; mutable target_notional_usd : float
+  ; mutable band_skips : int
+  ; mutable band_saved_usd : float
   }
 [@@deriving sexp_of]
 
@@ -94,7 +96,14 @@ let create () =
   ; shortfall_usd = 0.
   ; exec_fees_usd = 0.
   ; target_notional_usd = 0.
+  ; band_skips = 0
+  ; band_saved_usd = 0.
   }
+;;
+
+let band_skip t ~saved =
+  t.band_skips <- t.band_skips + 1;
+  t.band_saved_usd <- t.band_saved_usd +. saved
 ;;
 
 let parent t (r : Execution_algos.Cost_report.t) =
@@ -201,6 +210,14 @@ let prometheus follows =
     "hl_copy_exec_fees_usd"
     "Fees of finished parents (IOC fees estimated at the base tier)."
     (fun t -> t.exec_fees_usd);
+  counter
+    "hl_copy_band_skips_total"
+    "Rebalances held back because the gap was inside the follow's no-trade band."
+    (fun t -> t.band_skips);
+  gauge
+    "hl_copy_band_saved_usd"
+    "Estimated cost (fee and slippage) of the rebalances the band held back."
+    (fun t -> t.band_saved_usd);
   Buffer.contents buf
 ;;
 
@@ -247,5 +264,7 @@ let to_json t =
           (if Float.(t.target_notional_usd > 0.)
            then t.shortfall_usd /. t.target_notional_usd *. 10_000.
            else 0.) )
+    ; "band_skips", `Int t.band_skips
+    ; "band_saved_usd", `Float t.band_saved_usd
     ]
 ;;

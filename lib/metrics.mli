@@ -44,6 +44,9 @@ type t =
   ; mutable shortfall_usd : float (** implementation shortfall summed over parents *)
   ; mutable exec_fees_usd : float (** fees in the cost reports (estimated for IOCs) *)
   ; mutable target_notional_usd : float (** parents' size at their arrival prices *)
+  ; mutable band_skips : int
+  (** rebalances held back inside the no-trade band ([Within_band] notes) *)
+  ; mutable band_saved_usd : float (** their estimated cost, summed *)
   }
 [@@deriving sexp_of]
 
@@ -52,6 +55,9 @@ val reject : t -> Reject.t -> unit
 
 (** Counts a finished parent's cost report. *)
 val parent : t -> Execution_algos.Cost_report.t -> unit
+
+(** Counts one [Within_band] note and its saved cost (USD). *)
+val band_skip : t -> saved:float -> unit
 
 val total_rejects : t -> int
 
