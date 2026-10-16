@@ -88,9 +88,36 @@ module Input : sig
 
       val of_v1 : V1.t -> t
     end
+
+    (** [V2] with the follow's no-trade band ({!Follower_config.Stable.V3}). *)
+    module V3 : sig
+      type t =
+        | Configure of
+            { follow : Follower_config.Stable.V3.t
+            ; specs : Rounding.Spec.Stable.V1.t Mirror.Symbol_map.t
+            }
+        | Mirror of Mirror.Event.Stable.V1.t
+        | Order_rejected of
+            { cloid : Cloid.Stable.V1.t
+            ; message : string
+            }
+        | Pause of string
+        | Resume
+        | Stop
+        | Market of
+            { symbol : Market_data.Symbol.Stable.V1.t
+            ; now_ns : int
+            ; book : Execution_algos.Book.Stable.V1.t
+            ; traded : Market_data.Size.Stable.V1.t
+            }
+      [@@deriving bin_io, sexp, compare, equal]
+
+      val of_v2 : V2.t -> t
+      val of_v1 : V1.t -> t
+    end
   end
 
-  type t = Stable.V2.t =
+  type t = Stable.V3.t =
     | Configure of
         { follow : Follower_config.t
         ; specs : Rounding.Spec.t Mirror.Symbol_map.t
@@ -154,9 +181,27 @@ module Output : sig
       val of_v1 : V1.t -> t
       val to_v1 : t -> V1.t
     end
+
+    (** [V2] with {!Plan.Stable.V2}: notes may say [Within_band]. *)
+    module V3 : sig
+      type t =
+        { plan : Plan.Stable.V2.t
+        ; notices : Notice.t list
+        ; post_only : Cloid.Stable.V1.t list
+        ; reports : Execution_algos.Cost_report.Stable.V1.t list
+        }
+      [@@deriving bin_io, sexp, compare, equal]
+
+      (** Lossless: a V2 plan's notes are all V1 notes. *)
+      val of_v2 : V2.t -> t
+
+      val to_v2 : t -> V2.t
+      val of_v1 : V1.t -> t
+      val to_v1 : t -> V1.t
+    end
   end
 
-  type t = Stable.V2.t =
+  type t = Stable.V3.t =
     { plan : Plan.t
     (** what to send now, in wire terms (child orders); empty unless running (cancels
         excepted) *)

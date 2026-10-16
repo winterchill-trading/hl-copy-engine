@@ -68,9 +68,45 @@ module Input = struct
         | Stop -> Stop
       ;;
     end
+
+    module V3 = struct
+      type t =
+        | Configure of
+            { follow : Follower_config.Stable.V3.t
+            ; specs : Rounding.Spec.Stable.V1.t Mirror.Symbol_map.t
+            }
+        | Mirror of Mirror.Event.Stable.V1.t
+        | Order_rejected of
+            { cloid : Cloid.Stable.V1.t
+            ; message : string
+            }
+        | Pause of string
+        | Resume
+        | Stop
+        | Market of
+            { symbol : Market_data.Symbol.Stable.V1.t
+            ; now_ns : int
+            ; book : Execution_algos.Book.Stable.V1.t
+            ; traded : Size.Stable.V1.t
+            }
+      [@@deriving bin_io, sexp, compare, equal]
+
+      let of_v2 : V2.t -> t = function
+        | Configure { follow; specs } ->
+          Configure { follow = Follower_config.Stable.V3.of_v2 follow; specs }
+        | Mirror e -> Mirror e
+        | Order_rejected { cloid; message } -> Order_rejected { cloid; message }
+        | Pause r -> Pause r
+        | Resume -> Resume
+        | Stop -> Stop
+        | Market { symbol; now_ns; book; traded } -> Market { symbol; now_ns; book; traded }
+      ;;
+
+      let of_v1 v1 = of_v2 (V2.of_v1 v1)
+    end
   end
 
-  include Stable.V2
+  include Stable.V3
 end
 
 module Notice = struct
@@ -112,9 +148,30 @@ module Output = struct
 
       let to_v1 { plan; notices; post_only = _; reports = _ } : V1.t = { plan; notices }
     end
+
+    module V3 = struct
+      type t =
+        { plan : Plan.Stable.V2.t
+        ; notices : Notice.t list
+        ; post_only : Cloid.Stable.V1.t list [@sexp.list]
+        ; reports : Execution_algos.Cost_report.Stable.V1.t list [@sexp.list]
+        }
+      [@@deriving bin_io, sexp, compare, equal]
+
+      let of_v2 ({ plan; notices; post_only; reports } : V2.t) =
+        { plan = Plan.Stable.V2.of_v1 plan; notices; post_only; reports }
+      ;;
+
+      let to_v2 { plan; notices; post_only; reports } : V2.t =
+        { plan = Plan.Stable.V2.to_v1 plan; notices; post_only; reports }
+      ;;
+
+      let of_v1 v1 = of_v2 (V2.of_v1 v1)
+      let to_v1 t = V2.to_v1 (to_v2 t)
+    end
   end
 
-  include Stable.V2
+  include Stable.V3
 
   let empty = { plan = Plan.empty; notices = []; post_only = []; reports = [] }
 
@@ -221,12 +278,56 @@ let create ~follow ~specs =
   sync_config t
 ;;
 
+let band_uses_impact t =
+  match t.follow.band with
+  | Some { slippage = Impact _; _ } -> true
+  | Some { slippage = Fixed_bps _; _ } | None -> false
+;;
+
 let market_symbols t =
-  List.filter_map t.execs ~f:(fun (e : Exec.t) ->
-    match Execution_algos.Scheduler.algo e.sched with
-    | Immediate -> None
-    | Twap _ | Vwap _ | Pov _ | Passive _ | Adaptive _ -> Some e.order.symbol)
-  |> List.dedup_and_sort ~compare:Market_data.Symbol.compare
+  let parents =
+    List.filter_map t.execs ~f:(fun (e : Exec.t) ->
+      match Execution_algos.Scheduler.algo e.sched with
+      | Immediate -> None
+      | Twap _ | Vwap _ | Pov _ | Passive _ | Adaptive _ -> Some e.order.symbol)
+  in
+  (* a band estimating its slippage from the book needs every traded symbol's book *)
+  let band = if band_uses_impact t then Set.to_list t.mirror.managed else [] in
+  List.dedup_and_sort (parents @ band) ~compare:Market_data.Symbol.compare
+;;
+
+(* The expected slippage of the order that would close the symbol's gap now (one lot when
+   there is none), walked on the tick's book with [Impact.estimate]: what a band with
+   [Impact] slippage charges. Positive when adverse; an empty side keeps the last one. *)
+let update_slippage_estimate t ~symbol ~book =
+  match Map.find t.specs symbol with
+  | None -> t
+  | Some (spec : Rounding.Spec.t) ->
+    let m = t.mirror in
+    let current =
+      List.fold
+        m.pending
+        ~init:
+          (Option.value (Map.find m.follower_positions symbol) ~default:Size.zero)
+        ~f:(fun acc (p : Mirror.Pending.t) ->
+          if Market_data.Symbol.equal p.symbol symbol && not p.cancel_requested
+          then Size.(acc + p.remaining)
+          else acc)
+    in
+    let gap =
+      match Mirror.target m symbol with
+      | Some target, _ -> Size.(target - current)
+      | None, _ -> Size.zero
+    in
+    let side : Market_data.Side.t = if Size.is_negative gap then Sell else Buy in
+    let size = if Size.is_zero gap then spec.lot else Size.abs gap in
+    (match Execution_algos.Impact.estimate book ~side ~size with
+     | None -> t
+     | Some e ->
+       { t with
+         mirror =
+           Mirror.on_slippage_estimate m ~symbol ~bps:(Float.max 0. e.slippage_bps)
+       })
 ;;
 
 let is_resting_child t cloid =
@@ -679,6 +780,7 @@ let apply t (input : Input.t) =
     in
     dispatch_input t (Mirror (Resync { leader; follower; marks }))
   | _, Market { symbol; now_ns; book; traded } ->
+    let t = if band_uses_impact t then update_slippage_estimate t ~symbol ~book else t in
     List.fold t.execs ~init:(t, Output.empty) ~f:(fun (t, out) (e : Exec.t) ->
       if Market_data.Symbol.equal e.order.symbol symbol
       then (
