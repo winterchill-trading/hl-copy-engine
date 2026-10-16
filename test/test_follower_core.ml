@@ -307,9 +307,9 @@ let%expect_test "replay: the same inputs give the same outputs, through bin_io" 
     ]
   in
   let encode input =
-    Bin_prot.Writer.to_string Follower_core.Input.Stable.V2.bin_writer_t input
+    Bin_prot.Writer.to_string Follower_core.Input.Stable.V3.bin_writer_t input
   in
-  let decode s = Bin_prot.Reader.of_string Follower_core.Input.Stable.V2.bin_reader_t s in
+  let decode s = Bin_prot.Reader.of_string Follower_core.Input.Stable.V3.bin_reader_t s in
   let t1, out1 = ok_exn (Follower_core.replay inputs) in
   let t2, out2 =
     ok_exn (Follower_core.replay (List.map inputs ~f:(Fn.compose decode encode)))
