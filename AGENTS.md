@@ -50,6 +50,12 @@ Format only this repository, after the tests pass:
 - The follower core stays pure: state and event in, state and plan out. Effects live in `Follower`.
 - Journals are Bin_prot day files headed by an entry digest. Any change to the entry type needs a
   new digest and a replay test; `Journal.verify` must still replay the journals already on disk.
+  Entries are on version 3 (`.v3.journal`); each version gets its own file name and a
+  `load` branch on its digest, and `test_journal.ml` writes a file of every older version.
+- A follow without a band must produce the same outputs as before bands existed: band
+  behaviour lives in hl-copy-core's `No_trade_band` and only runs when `follow.band` is set.
+  Inputs that change mirror state (the `Impact` slippage estimate) must come from journaled
+  inputs, never from the follower actor directly.
 - The engine reads only files written by `hl-copy-api`. Do not give it a database connection.
 - Metrics names are part of the operator's dashboards; rename only with a note in the README.
 - Odoc on every public value; comments at every pinned limit, saying what and why.
