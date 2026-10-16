@@ -997,16 +997,16 @@ let band_json t =
                | Within_band { gap; band; saved } ->
                  Some
                    (`Assoc
-                       [ ( "time"
-                         , `String
-                             (Time_ns.to_string_iso8601_basic
-                                time
-                                ~zone:Time_float.Zone.utc) )
-                       ; "coin", `String (Symbol.to_string n.symbol)
-                       ; "gap", `Float (Market_data.Size.to_float gap)
-                       ; "band_usd", `Float (Usd.to_float band)
-                       ; "saved_usd", `Float (Usd.to_float saved)
-                       ])
+                     [ ( "time"
+                       , `String
+                           (Time_ns.to_string_iso8601_basic
+                              time
+                              ~zone:Time_float.Zone.utc) )
+                     ; "coin", `String (Symbol.to_string n.symbol)
+                     ; "gap", `Float (Market_data.Size.to_float gap)
+                     ; "band_usd", `Float (Usd.to_float band)
+                     ; "saved_usd", `Float (Usd.to_float saved)
+                     ])
                | Capped _ | No_mark | No_spec | No_leader_equity -> None)) )
       ]
 ;;

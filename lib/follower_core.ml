@@ -99,7 +99,8 @@ module Input = struct
         | Pause r -> Pause r
         | Resume -> Resume
         | Stop -> Stop
-        | Market { symbol; now_ns; book; traded } -> Market { symbol; now_ns; book; traded }
+        | Market { symbol; now_ns; book; traded } ->
+          Market { symbol; now_ns; book; traded }
       ;;
 
       let of_v1 v1 = of_v2 (V2.of_v1 v1)
@@ -307,8 +308,7 @@ let update_slippage_estimate t ~symbol ~book =
     let current =
       List.fold
         m.pending
-        ~init:
-          (Option.value (Map.find m.follower_positions symbol) ~default:Size.zero)
+        ~init:(Option.value (Map.find m.follower_positions symbol) ~default:Size.zero)
         ~f:(fun acc (p : Mirror.Pending.t) ->
           if Market_data.Symbol.equal p.symbol symbol && not p.cancel_requested
           then Size.(acc + p.remaining)
@@ -325,8 +325,7 @@ let update_slippage_estimate t ~symbol ~book =
      | None -> t
      | Some e ->
        { t with
-         mirror =
-           Mirror.on_slippage_estimate m ~symbol ~bps:(Float.max 0. e.slippage_bps)
+         mirror = Mirror.on_slippage_estimate m ~symbol ~bps:(Float.max 0. e.slippage_bps)
        })
 ;;
 

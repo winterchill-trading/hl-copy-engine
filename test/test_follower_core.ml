@@ -488,11 +488,14 @@ let notes_of (out : Follower_core.Output.t) =
 let%expect_test "the band holds back small rebalances and records the saved cost" =
   let t = Follower_core.create ~follow:(banded No_trade_band.default) ~specs in
   (* the follower already holds the scaled 1 BTC: nothing to do *)
-  let t, _ = Follower_core.apply t (resync ~leader:[ btc, "1" ] ~follower:[ btc, "0.1" ] ()) in
+  let t, _ =
+    Follower_core.apply t (resync ~leader:[ btc, "1" ] ~follower:[ btc, "0.1" ] ())
+  in
   (* a 4.5% move of the leader is 450 USD for the follower, inside the 528 USD edge *)
   let t, out = Follower_core.apply t (position btc "1.045" "100000") in
   notes_of out;
-  [%expect {|
+  [%expect
+    {|
     ()
     (((symbol BTC)
       (reason (Within_band (gap 0.0045) (band 527.77777778) (saved 0.4275)))))
@@ -500,15 +503,14 @@ let%expect_test "the band holds back small rebalances and records the saved cost
   (* 10% more is 1,000 USD: trade to the edge *)
   let t, out = Follower_core.apply t (position btc "1.1" "100000") in
   notes_of out;
-  [%expect {|
+  [%expect
+    {|
     (((cloid 0x01eade50000000000000000000000000) (symbol BTC) (side Buy)
       (size 0.00472) (limit_px 100200) (reduce_only false)))
     ()
     |}];
   (* the journal stores the note: through bin_io and back *)
-  let bytes =
-    Bin_prot.Writer.to_string Follower_core.Output.Stable.V3.bin_writer_t out
-  in
+  let bytes = Bin_prot.Writer.to_string Follower_core.Output.Stable.V3.bin_writer_t out in
   print_s
     [%sexp
       ([%equal: Follower_core.Output.t]
@@ -520,11 +522,11 @@ let%expect_test "the band holds back small rebalances and records the saved cost
 ;;
 
 let%expect_test "an Impact band takes its slippage from market ticks" =
-  let band =
-    { No_trade_band.default with slippage = Impact { fallback_bps = 5. } }
-  in
+  let band = { No_trade_band.default with slippage = Impact { fallback_bps = 5. } } in
   let t = Follower_core.create ~follow:(banded band) ~specs in
-  let t, _ = Follower_core.apply t (resync ~leader:[ btc, "1" ] ~follower:[ btc, "0.1" ] ()) in
+  let t, _ =
+    Follower_core.apply t (resync ~leader:[ btc, "1" ] ~follower:[ btc, "0.1" ] ())
+  in
   print_s [%sexp (Follower_core.market_symbols t : Symbol.t list)];
   [%expect {| (BTC) |}];
   let book =
@@ -536,9 +538,7 @@ let%expect_test "an Impact band takes its slippage from market ticks" =
         ]
   in
   let t, _ =
-    Follower_core.apply
-      t
-      (Market { symbol = btc; now_ns = 0; book; traded = Size.zero })
+    Follower_core.apply t (Market { symbol = btc; now_ns = 0; book; traded = Size.zero })
   in
   print_s [%sexp (t.mirror.slippage_estimates : float Mirror.Symbol_map.t)];
   [%expect {| ((BTC 1)) |}];

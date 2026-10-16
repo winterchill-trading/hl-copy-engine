@@ -114,7 +114,8 @@ module Writer : sig
 end
 
 (** Every entry of every journal file in [dir], files in date order, version 1 files
-    converted ({!Entry.Stable.V3.of_v1}, {!Entry.Stable.V3.of_v2}). A missing directory is an empty journal. *)
+    converted ({!Entry.Stable.V3.of_v1}, {!Entry.Stable.V3.of_v2}). A missing directory is
+    an empty journal. *)
 val load : string -> Entry.t list Deferred.t
 
 val inputs : Entry.t list -> Follower_core.Input.t list

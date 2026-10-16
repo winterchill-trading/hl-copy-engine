@@ -246,7 +246,8 @@ let%expect_test "a version 2 journal still loads, replays and verifies" =
         ~entries:(List.length entries : int)
         ~mismatch:(Option.is_some verified.mismatch : bool)
         ~orders:(verified.orders : int)];
-  [%expect {|
+  [%expect
+    {|
     (2026-10-13.v2.journal 2026-10-14.v2.journal 2026-10-14.v3.journal)
     ((entries 8) (mismatch false) (orders 2))
     |}];

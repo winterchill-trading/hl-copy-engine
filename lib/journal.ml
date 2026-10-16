@@ -80,10 +80,9 @@ let dir ~root (follow : Follower_config.t) =
   ^/ sprintf "%s-%s" (Address.to_string follow.follower) (Address.to_string follow.leader)
 ;;
 
-
-(* Each version gets its own file name, so a restart on the day of an upgrade never appends
-   to an older file (the writer refuses another digest). Names sort by date, and within a
-   day version 1 ([.journal]) before 2 ([.v2.journal]) before 3. *)
+(* Each version gets its own file name, so a restart on the day of an upgrade never
+   appends to an older file (the writer refuses another digest). Names sort by date, and
+   within a day version 1 ([.journal]) before 2 ([.v2.journal]) before 3. *)
 let file_name date = Date.to_string date ^ ".v3.journal"
 
 module Writer = struct
