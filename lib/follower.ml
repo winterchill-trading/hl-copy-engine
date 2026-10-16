@@ -155,6 +155,7 @@ type t =
   ; market : Market.t
   ; mutable own_fills : [ `Off | `Opening | `On of Hl_client.User_feed.t ]
   ; reports : (Time_ns.t * Execution_algos.Cost_report.t) Queue.t
+  ; band_skips : (Time_ns.t * Plan.Note.t) Queue.t (** the last [recent_reports] *)
   ; mutable totals : Execution_algos.Cost_report.Totals.t
   ; stopped : unit Ivar.t
   }
@@ -262,6 +263,19 @@ let record_report t ~time (r : Execution_algos.Cost_report.t) =
   Metrics.parent t.metrics r
 ;;
 
+(* [Within_band] notes: rebalances the no-trade band held back. *)
+let record_band_skips t ~time (plan : Plan.t) =
+  List.iter plan.notes ~f:(fun (n : Plan.Note.t) ->
+    match n.reason with
+    | Within_band { saved; _ } ->
+      Queue.enqueue t.band_skips (time, n);
+      while Queue.length t.band_skips > recent_reports do
+        ignore (Queue.dequeue_exn t.band_skips : Time_ns.t * Plan.Note.t)
+      done;
+      Metrics.band_skip t.metrics ~saved:(Usd.to_float saved)
+    | Capped _ | No_mark | No_spec | No_leader_equity -> ())
+;;
+
 let fill_of_user_fill (f : User_fill.t) =
   { Fill.time_ns = f.time * 1_000_000
   ; symbol = f.coin
@@ -288,6 +302,7 @@ let rec apply t ?lag_from input =
   Option.iter t.journal ~f:(fun j -> Journal.Writer.output j ~time output);
   List.iter output.notices ~f:(log_notice t);
   List.iter output.reports ~f:(record_report t ~time);
+  record_band_skips t ~time output.plan;
   t.metrics.paused <- not (Follower_core.is_running core);
   watch_market t;
   if not (List.is_empty output.post_only) then watch_own_fills t;
@@ -757,6 +772,7 @@ let start
     ; market = Market.create ()
     ; own_fills = `Off
     ; reports = Queue.create ()
+    ; band_skips = Queue.create ()
     ; totals = Execution_algos.Cost_report.Totals.empty
     ; stopped = Ivar.create ()
     }
@@ -951,6 +967,50 @@ let execution_json t =
     ]
 ;;
 
+(* The follow's no-trade band, what it held back and the slippage estimates it uses. *)
+let band_json t =
+  match t.core.follow.band with
+  | None -> `Null
+  | Some (band : No_trade_band.t) ->
+    let m = t.core.mirror in
+    let half_width =
+      No_trade_band.half_width
+        band
+        ~cost_bps:(No_trade_band.cost_bps band ~estimate:None)
+        ~equity:(Usd.to_float m.follower_equity)
+    in
+    `Assoc
+      [ "config", `String (Sexp.to_string (No_trade_band.sexp_of_t band))
+      ; "half_width_usd", `Float half_width
+      ; "skips", `Int t.metrics.band_skips
+      ; "saved_usd", `Float t.metrics.band_saved_usd
+      ; ( "slippage_estimates_bps"
+        , `Assoc
+            (Map.to_alist m.slippage_estimates
+             |> List.map ~f:(fun (s, bps) -> Symbol.to_string s, `Float bps)) )
+      ; ( "recent"
+        , `List
+            (Queue.to_list t.band_skips
+             |> List.rev
+             |> List.filter_map ~f:(fun (time, (n : Plan.Note.t)) ->
+               match n.reason with
+               | Within_band { gap; band; saved } ->
+                 Some
+                   (`Assoc
+                       [ ( "time"
+                         , `String
+                             (Time_ns.to_string_iso8601_basic
+                                time
+                                ~zone:Time_float.Zone.utc) )
+                       ; "coin", `String (Symbol.to_string n.symbol)
+                       ; "gap", `Float (Market_data.Size.to_float gap)
+                       ; "band_usd", `Float (Usd.to_float band)
+                       ; "saved_usd", `Float (Usd.to_float saved)
+                       ])
+               | Capped _ | No_mark | No_spec | No_leader_equity -> None)) )
+      ]
+;;
+
 let status_json t =
   let core = t.core in
   let m = core.mirror in
@@ -991,6 +1051,7 @@ let status_json t =
     ; "metrics", Metrics.to_json t.metrics
     ; "builder", builder_json t
     ; "execution", execution_json t
+    ; "band", band_json t
     ]
 ;;
 
